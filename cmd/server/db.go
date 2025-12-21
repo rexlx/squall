@@ -19,6 +19,7 @@ type Database interface {
 	StoreUser(user User) error
 	GetRoom(roomid string) (Room, error)
 	StoreRoom(room Room) error
+	GetUserByEmail(email string) (User, error)
 }
 
 type PostgresDB struct {
@@ -205,4 +206,18 @@ func (db *PostgresDB) StoreRoom(r Room) error {
 
 	_, err := db.Conn.Exec(query, r.ID, r.Name, r.MaxMessages, statsJSON)
 	return err
+}
+
+func (db *PostgresDB) GetUserByEmail(email string) (User, error) {
+	// Select the ID first, or the whole row
+	query := `SELECT id FROM users WHERE email = $1`
+	row := db.Conn.QueryRow(query, email)
+
+	var id string
+	if err := row.Scan(&id); err != nil {
+		return User{}, err
+	}
+
+	// Reuse existing GetUser
+	return db.GetUser(id)
 }

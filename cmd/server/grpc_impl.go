@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 
+	"github.com/rexlx/squall/internal"
 	pb "github.com/rexlx/squall/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type GrpcServer struct {
@@ -24,21 +28,64 @@ func NewGrpcServer(app *Server) *GrpcServer {
 	}
 }
 
-// 1. Login Implementation
+// Login matches the signature defined in your proto file
 func (s *GrpcServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
-	// Simple mock logic connecting to your User struct logic
-	// In reality, fetch user from s.appServer.DB or memory
-	// This mirrors your existing HTTP LoginHandler logic
+	// 1. Validation (Replaces checking r.Body or empty fields)
+	if req.Email == "" || req.Password == "" {
+		return nil, status.Error(codes.InvalidArgument, "email and password are required")
+	}
 
-	// Mock success for demonstration
+	// 2. User Lookup (Business logic logic remains the same)
+	// Note: You'll need to ensure your DB has a method to find by email,
+	// as your KV store might only be keyed by ID.
+	user, err := s.appServer.DB.GetUserByEmail(req.Email)
+	if err != nil {
+		// Differentiate between "System Error" and "Not Found" to avoid leaking user existence
+		// or just return Unauthenticated for everything to be safe.
+		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+	fmt.Println("User found:", user.Email)
+	// 3. Password Check (Replaces u.PasswordMatches)
+	ok, err := user.PasswordMatches(req.Password)
+	if err != nil {
+		// Internal hashing error
+		return nil, status.Error(codes.Internal, "internal auth error")
+	}
+	if !ok {
+		// HTTP: w.Write({"message": "password wrong"})
+		// gRPC: Return specific error code
+		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+
+	// 4. Update State (Replaces u.updateHandle and s.AddUser)
+	// Assuming these modify the 'user' struct
+	// user.updateHandle() // If you have this method
+	if err := s.appServer.DB.StoreUser(user); err != nil {
+		return nil, status.Error(codes.Internal, "failed to update user session")
+	}
+
+	// 5. Statistics (Replaces s.Stats.App["logins"]++)
+	s.appServer.Memory.Lock()
+	s.appServer.Stats["logins"] = append(s.appServer.Stats["logins"], internal.Stat{Value: 1})
+	s.appServer.Memory.Unlock()
+
+	// 6. Generate Token (Best Practice)
+	// In gRPC, we rarely just return the User object. We return a Token
+	// (JWT) that the client uses for future requests.
+	token, err := GenerateJWT(user.ID, s.appServer.Key) // You would implement this helper
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to generate token")
+	}
+
+	// 7. Success Response
 	return &pb.LoginResponse{
 		User: &pb.User{
-			Id:        "user-123",
-			Email:     req.Email,
-			FirstName: "Test",
+			Id:        user.ID,
+			Email:     user.Email,
+			FirstName: user.Name,
+			// Do NOT map the Password field back to the client
 		},
-		Token: "simulated_grpc_token",
-		Error: false,
+		Token: token,
 	}, nil
 }
 
@@ -50,7 +97,7 @@ func (s *GrpcServer) JoinRoom(ctx context.Context, req *pb.JoinRoomRequest) (*pb
 
 	// simplified logic
 	roomID := "room-" + req.RoomName
-
+	fmt.Println("new room", roomID)
 	return &pb.RoomResponse{
 		RoomId:  roomID,
 		Name:    req.RoomName,
