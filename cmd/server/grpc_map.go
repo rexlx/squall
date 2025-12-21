@@ -1,55 +1,50 @@
 package main
 
 import (
-	"encoding/base64"
 	"time"
 
 	"github.com/rexlx/squall/internal"
-	pb "github.com/rexlx/squall/proto" // Assuming you generate code here
+	pb "github.com/rexlx/squall/proto"
 )
 
-// ToProto converts your internal/pure Go Message struct to the gRPC Proto struct
+// ToProto converts internal.Message to pb.ChatMessage
 func ToProto(m internal.Message) *pb.ChatMessage {
-	// 1. Handle Time conversion (String ISO8601 -> Int64 Unix)
+	// Parse Time (String -> Int64)
 	var ts int64
 	parsedTime, err := time.Parse(time.RFC3339, m.Time)
 	if err == nil {
 		ts = parsedTime.Unix()
 	} else {
-		ts = time.Now().Unix() // Fallback
+		ts = time.Now().Unix()
 	}
 
-	// 2. Handle Content (Base64 String -> Bytes)
-	// Your client sends ciphertext as a base64 string. gRPC prefers raw bytes.
-	decodedContent, _ := base64.StdEncoding.DecodeString(m.Message)
-
+	// Content (Base64 String -> Bytes) in proto
+	// If your proto uses 'string message_content' instead of 'bytes', remove the DecodeString part.
+	// Assuming the latest proto uses 'string message_content':
 	return &pb.ChatMessage{
-		RoomId:           m.RoomID,
-		UserId:           m.UserID,
-		EncryptedContent: decodedContent,
-		Timestamp:        ts,
-		ReplyTo:          m.ReplyTo,
-		Email:            m.Email,
-		Iv:               m.InitialVector,
-		HotSauce:         m.HotSauce,
+		RoomId:         m.RoomID,
+		UserId:         m.UserID,
+		Email:          m.Email,
+		MessageContent: m.Message, // Pass base64 string directly
+		Timestamp:      ts,
+		ReplyTo:        m.ReplyTo,
+		Iv:             m.InitialVector,
+		HotSauce:       m.HotSauce,
 	}
 }
 
-// FromProto converts the gRPC Proto struct back to your internal/pure Go Message
+// FromProto converts pb.ChatMessage to internal.Message
 func FromProto(p *pb.ChatMessage) internal.Message {
-	// 1. Handle Time (Int64 Unix -> String ISO8601)
+	// Time (Int64 -> String)
 	t := time.Unix(p.Timestamp, 0).Format(time.RFC3339)
-
-	// 2. Handle Content (Bytes -> Base64 String)
-	encodedContent := base64.StdEncoding.EncodeToString(p.EncryptedContent)
 
 	return internal.Message{
 		RoomID:        p.RoomId,
 		UserID:        p.UserId,
-		Message:       encodedContent, // Restores the base64 string format
+		Email:         p.Email,
+		Message:       p.MessageContent, // Keep as base64 string
 		Time:          t,
 		ReplyTo:       p.ReplyTo,
-		Email:         p.Email,
 		InitialVector: p.Iv,
 		HotSauce:      p.HotSauce,
 	}

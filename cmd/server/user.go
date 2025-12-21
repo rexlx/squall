@@ -21,11 +21,18 @@ type User struct {
 	Posts    []internal.Post   `json:"posts"`
 }
 
+// SetPassword hashes the input password and stores it in the User struct
+func (u *User) SetPassword(input string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(input), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	u.Password = string(hash)
+	return nil
+}
+
 func (u *User) PasswordMatches(input string) (bool, error) {
 	err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(input))
-	if err != nil {
-		return false, err
-	}
 	if err != nil {
 		switch {
 		case errors.Is(err, bcrypt.ErrMismatchedHashAndPassword):

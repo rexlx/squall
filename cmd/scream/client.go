@@ -28,8 +28,8 @@ var Client = &APIClient{
 }
 
 func LoadTLSConfig() (*tls.Config, error) {
-	// Load client cert
-	cert, err := tls.LoadX509KeyPair("certs/client.crt", "certs/client.key")
+	// 	client-cert.pem	client-key.pem
+	cert, err := tls.LoadX509KeyPair("data/client-cert.pem", "data/client-key.pem")
 	if err != nil {
 		return nil, err
 	}

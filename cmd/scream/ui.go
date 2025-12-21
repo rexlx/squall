@@ -3,12 +3,15 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	pb "github.com/rexlx/squall/proto" // Import generated proto
 )
 
 var (
@@ -20,6 +23,7 @@ var (
 	scrollBox   *container.Scroll
 )
 
+// MakeLoginScreen remains largely the same, assuming Client.Login signature didn't change.
 func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	emailEntry := widget.NewEntry()
 	emailEntry.SetPlaceHolder("Username/Email")
@@ -31,6 +35,7 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	errorLabel.Hide()
 
 	loginBtn := widget.NewButton("Login", func() {
+		// Ensure Client.Login returns error on failure
 		err := Client.Login(emailEntry.Text, passEntry.Text)
 		if err != nil {
 			errorLabel.SetText(err.Error())
@@ -55,8 +60,6 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 
 func MakeMainScreen() fyne.CanvasObject {
 	// --- Sidebar ---
-
-	// Navigation items
 	menuList := widget.NewList(
 		func() int { return 4 },
 		func() fyne.CanvasObject { return widget.NewLabel("Item") },
@@ -84,7 +87,6 @@ func MakeMainScreen() fyne.CanvasObject {
 	)
 
 	// --- Chat Area ---
-
 	messagesBox = container.NewVBox()
 	scrollBox = container.NewVScroll(messagesBox)
 
@@ -96,17 +98,18 @@ func MakeMainScreen() fyne.CanvasObject {
 		if msgInput.Text == "" {
 			return
 		}
-		go func(txt string) {
-			if err := Client.SendMessage(txt); err != nil {
+		// Capture text to send
+		txt := msgInput.Text
+		go func(t string) {
+			if err := Client.SendMessage(t); err != nil {
 				fmt.Println("Send Error:", err)
 			}
-		}(msgInput.Text)
+		}(txt)
 		msgInput.SetText("")
 	})
 
 	inputBar := container.NewBorder(nil, nil, nil, sendBtn, msgInput)
 
-	// Start with a welcome text
 	messagesBox.Add(widget.NewLabel("Welcome. Join a room to start."))
 
 	chatContent := container.NewBorder(
@@ -116,9 +119,8 @@ func MakeMainScreen() fyne.CanvasObject {
 		container.NewPadded(scrollBox),
 	)
 
-	// Split Container
 	split := container.NewHSplit(sidebar, chatContent)
-	split.SetOffset(0.25) // Sidebar takes 25%
+	split.SetOffset(0.25)
 
 	return split
 }
@@ -127,26 +129,30 @@ func loadRoom(name string) {
 	messagesBox.Objects = nil // Clear old messages
 	messagesBox.Refresh()
 
+	// Client.JoinRoom now returns error, and sets Client.CurrentRoom (*pb.RoomResponse)
 	err := Client.JoinRoom(name)
 	if err != nil {
 		messagesBox.Add(widget.NewLabel("Error joining room: " + err.Error()))
 		return
 	}
 
-	// Load existing messages
-	for _, m := range Client.CurrentRoom.Messages {
-		appendMessage(m)
+	// Assuming RoomResponse includes a History field (repeated ChatMessage)
+	if Client.CurrentRoom.History != nil {
+		for _, m := range Client.CurrentRoom.History {
+			appendMessage(m)
+		}
 	}
 
-	// Connect WS
-	Client.ConnectWS(Client.CurrentRoom.ID)
+	// Stream is started inside Client.JoinRoom or Client.StartStream now
 }
 
-func appendMessage(m Message) {
-	// Decrypt if necessary
-	content := m.Message
+// Update input type to *pb.ChatMessage
+func appendMessage(m *pb.ChatMessage) {
+	content := m.MessageContent
+
+	// Decrypt if HotSauce (KeyName) is present
 	if m.HotSauce != "" {
-		decrypted, err := DecryptMessage(m.Message, m.HotSauce, m.IV)
+		decrypted, err := DecryptMessage(m.MessageContent, m.HotSauce, m.Iv)
 		if err == nil {
 			content = decrypted
 		} else {
@@ -154,8 +160,11 @@ func appendMessage(m Message) {
 		}
 	}
 
-	// Basic styling
-	header := canvas.NewText(m.Email+" "+m.Time, color.RGBA{0, 0, 128, 255})
+	// Convert Timestamp (int64) to readable string
+	timeStr := time.Unix(m.Timestamp, 0).Format("15:04:05")
+
+	// Styling
+	header := canvas.NewText(m.Email+" "+timeStr, color.RGBA{0, 0, 128, 255})
 	header.TextSize = 10
 
 	body := widget.NewLabel(content)
@@ -168,6 +177,7 @@ func appendMessage(m Message) {
 }
 
 func ListenForMessages() {
+	// Client.MsgChan is now chan *pb.ChatMessage
 	for msg := range Client.MsgChan {
 		appendMessage(msg)
 	}
