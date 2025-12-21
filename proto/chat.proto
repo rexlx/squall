@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package chat;
+
+service ChatService {
+  // Bi-directional stream: Client sends messages, Server broadcasts them back
+  rpc Stream(stream ChatMessage) returns (stream ChatMessage);
+
+  // Administrative tasks
+  rpc CreateRoom(RoomRequest) returns (RoomResponse);
+  rpc BanUser(AdminRequest) returns (AdminResponse);
+}
+
+message ChatMessage {
+  string room_id = 1;
+  string user_id = 2;
+  // This is the AES-256 encrypted blob. The server never decodes this.
+  bytes encrypted_content = 3; 
+  int64 timestamp = 4;
+}
+
+message RoomRequest {
+  string name = 1;
+}
+
+message RoomResponse {
+  string room_id = 1;
+  bool success = 2;
+}
+
+message AdminRequest {
+  string user_id = 1;
+  string room_id = 2;
+}
+
+message AdminResponse {
+  bool success = 1;
+}
