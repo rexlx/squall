@@ -2,21 +2,59 @@ syntax = "proto3";
 
 package chat;
 
-service ChatService {
-  // Bi-directional stream: Client sends messages, Server broadcasts them back
-  rpc Stream(stream ChatMessage) returns (stream ChatMessage);
+option go_package = "github.com/rexlx/squall/proto";
 
-  // Administrative tasks
+service ChatService {
+  // 1. Login Endpoint (replaces POST /login)
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  // 2. Room Management (replaces POST /room/:name)
+  rpc JoinRoom(JoinRoomRequest) returns (RoomResponse);
+
+  // 3. Chat Stream (replaces POST /message and WS /ws/...)
+  // Clients send messages into this stream and receive broadcasts from it.
+  rpc Stream(stream ChatMessage) returns (stream ChatMessage);
+  
+  // Admin tasks (kept from original)
   rpc CreateRoom(RoomRequest) returns (RoomResponse);
   rpc BanUser(AdminRequest) returns (AdminResponse);
 }
 
+// --- Message Definitions ---
+
 message ChatMessage {
   string room_id = 1;
   string user_id = 2;
-  // This is the AES-256 encrypted blob. The server never decodes this.
-  bytes encrypted_content = 3; 
-  int64 timestamp = 4;
+  string email = 3;
+  
+  // Content matches internal.Message.Message (Base64 ciphertext)
+  // We use bytes for efficiency, but you can stick to string if you prefer 
+  // keeping the base64 representation directly.
+  string message_content = 4; 
+
+  int64 timestamp = 5;
+  string reply_to = 6;
+  
+  // Encryption Metadata
+  string iv = 7;        
+  string hot_sauce = 8; 
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  User user = 1;
+  string token = 2;
+  string message = 3;
+  bool error = 4;
+}
+
+message JoinRoomRequest {
+  string email = 1;
+  string room_name = 2;
 }
 
 message RoomRequest {
@@ -25,7 +63,10 @@ message RoomRequest {
 
 message RoomResponse {
   string room_id = 1;
-  bool success = 2;
+  string name = 2;
+  bool success = 3;
+  // You might want to return recent messages upon joining
+  repeated ChatMessage history = 4; 
 }
 
 message AdminRequest {
@@ -35,4 +76,12 @@ message AdminRequest {
 
 message AdminResponse {
   bool success = 1;
+}
+
+message User {
+  string id = 1;
+  string email = 2;
+  string first_name = 3;
+  string last_name = 4;
+  repeated string rooms = 5;
 }
