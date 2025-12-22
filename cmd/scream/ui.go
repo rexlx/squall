@@ -59,35 +59,14 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 }
 
 func MakeMainScreen() fyne.CanvasObject {
-	// --- Sidebar ---
-	menuList := widget.NewList(
-		func() int { return 4 },
-		func() fyne.CanvasObject { return widget.NewLabel("Item") },
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			items := []string{"Home", "Profile", "History", "Rooms"}
-			o.(*widget.Label).SetText(items[i])
-		},
-	)
+	// --- Container for Dynamic Content (Right Side) ---
+	// We use a Max container so we can easily swap between Chat and History views
+	contentContainer := container.NewMax()
 
-	newRoomEntry := widget.NewEntry()
-	newRoomEntry.SetPlaceHolder("New Room Name")
+	// --- 1. Construct the Chat View ---
 
-	joinBtn := widget.NewButton("Join", func() {
-		if newRoomEntry.Text != "" {
-			loadRoom(newRoomEntry.Text)
-			newRoomEntry.SetText("")
-		}
-	})
-
-	sidebar := container.NewBorder(
-		widget.NewLabel("MENU"),
-		container.NewVBox(newRoomEntry, joinBtn),
-		nil, nil,
-		menuList,
-	)
-
-	// --- Chat Area ---
 	messagesBox = container.NewVBox()
+	messagesBox.Add(widget.NewLabel("Welcome. Join a room to start."))
 	scrollBox = container.NewVScroll(messagesBox)
 
 	msgInput := widget.NewMultiLineEntry()
@@ -98,7 +77,6 @@ func MakeMainScreen() fyne.CanvasObject {
 		if msgInput.Text == "" {
 			return
 		}
-		// Capture text to send
 		txt := msgInput.Text
 		go func(t string) {
 			if err := Client.SendMessage(t); err != nil {
@@ -110,17 +88,105 @@ func MakeMainScreen() fyne.CanvasObject {
 
 	inputBar := container.NewBorder(nil, nil, nil, sendBtn, msgInput)
 
-	messagesBox.Add(widget.NewLabel("Welcome. Join a room to start."))
-
-	chatContent := container.NewBorder(
+	chatView := container.NewBorder(
 		container.NewPadded(widget.NewLabelWithStyle("Chat", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
 		container.NewPadded(inputBar),
 		nil, nil,
 		container.NewPadded(scrollBox),
 	)
 
-	split := container.NewHSplit(sidebar, chatContent)
-	split.SetOffset(0.25)
+	// --- 2. Construct the History View Logic ---
+
+	showHistory := func() {
+		list := container.NewVBox()
+		list.Add(widget.NewLabelWithStyle("Room History", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+		list.Add(widget.NewSeparator())
+
+		if len(Client.User.History) == 0 {
+			list.Add(widget.NewLabel("No history found."))
+		}
+
+		// Iterate through history and create a button for each room
+		for _, roomName := range Client.User.History {
+			// Capture the variable for the closure
+			rName := roomName
+			btn := widget.NewButton(rName, func() {
+				// 1. Load the room logic (API call + connection)
+				loadRoom(rName)
+
+				// 2. Switch UI back to Chat View
+				contentContainer.Objects = []fyne.CanvasObject{chatView}
+				contentContainer.Refresh()
+			})
+			btn.Alignment = widget.ButtonAlignLeading
+			list.Add(btn)
+		}
+
+		// Wrap the list in a scroll container in case history is long
+		historyView := container.NewPadded(container.NewVScroll(list))
+
+		// Swap the content
+		contentContainer.Objects = []fyne.CanvasObject{historyView}
+		contentContainer.Refresh()
+	}
+
+	// --- 3. Construct the Sidebar ---
+
+	// Navigation Menu
+	menuList := widget.NewList(
+		func() int { return 4 },
+		func() fyne.CanvasObject { return widget.NewLabel("Item") },
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			items := []string{"Chat", "Profile", "History", "Rooms"}
+			o.(*widget.Label).SetText(items[i])
+		},
+	)
+
+	// Handle Menu Selection
+	menuList.OnSelected = func(id widget.ListItemID) {
+		switch id {
+		case 0: // Chat
+			contentContainer.Objects = []fyne.CanvasObject{chatView}
+			contentContainer.Refresh()
+		case 2: // History
+			showHistory()
+		default:
+			// For now, default back to chat or show a placeholder
+			// specific handlers for Profile/Rooms can be added here later
+			contentContainer.Objects = []fyne.CanvasObject{chatView}
+			contentContainer.Refresh()
+		}
+	}
+
+	// Room Joiner in Sidebar
+	newRoomEntry := widget.NewEntry()
+	newRoomEntry.SetPlaceHolder("New Room Name")
+
+	joinBtn := widget.NewButton("Join", func() {
+		if newRoomEntry.Text != "" {
+			loadRoom(newRoomEntry.Text)
+			newRoomEntry.SetText("")
+			// Ensure we are looking at the chat view when joining
+			contentContainer.Objects = []fyne.CanvasObject{chatView}
+			contentContainer.Refresh()
+		}
+	})
+
+	sidebar := container.NewBorder(
+		widget.NewLabel("MENU"),
+		container.NewVBox(newRoomEntry, joinBtn),
+		nil, nil,
+		menuList,
+	)
+
+	// --- 4. Final Layout ---
+
+	// Initialize with Chat View
+	contentContainer.Objects = []fyne.CanvasObject{chatView}
+
+	// Split Container (Sidebar | Content)
+	split := container.NewHSplit(sidebar, contentContainer)
+	split.SetOffset(0.25) // Sidebar takes 25%
 
 	return split
 }

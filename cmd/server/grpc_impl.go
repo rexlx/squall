@@ -91,24 +91,62 @@ func (s *GrpcServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 
 // 2. JoinRoom Implementation
 func (s *GrpcServer) JoinRoom(ctx context.Context, req *pb.JoinRoomRequest) (*pb.RoomResponse, error) {
-	// Logic to find/create room in s.appServer.Rooms
-	s.appServer.Memory.Lock()
-	defer s.appServer.Memory.Unlock()
+	// 1. Try to fetch the room
+	roomName := req.RoomName
+	room, err := s.appServer.DB.GetRoom(roomName)
 
-	// simplified logic
-	roomID := "room-" + req.RoomName
-	fmt.Println("new room", roomID)
+	// If error (likely sql.ErrNoRows), create the room
+	if err != nil {
+		// Create new empty room
+		newRoom := Room{
+			ID:          roomName, // Using name as ID for simplicity
+			Name:        roomName,
+			MaxMessages: 1000,
+			// Initialize other fields if necessary
+		}
+
+		// --- PERSISTENCE FIX ---
+		if err := s.appServer.DB.StoreRoom(newRoom); err != nil {
+			return nil, status.Error(codes.Internal, "failed to create new room")
+		}
+		room = newRoom
+	}
+
+	// 2. Prepare History to send back
+	var history []*pb.ChatMessage
+	for _, m := range room.Messages {
+		history = append(history, ToProto(m))
+	}
+
+	// 3. Update User History (Add room to their list)
+	// We call GetUserByEmail assuming you added that to db.go in the previous turn
+	user, err := s.appServer.DB.GetUserByEmail(req.Email)
+	if err == nil {
+		exists := false
+		for _, h := range user.History {
+			if h == roomName {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			user.History = append(user.History, roomName)
+			// Save the updated user
+			_ = s.appServer.DB.StoreUser(user)
+		}
+	}
+
 	return &pb.RoomResponse{
-		RoomId:  roomID,
-		Name:    req.RoomName,
+		RoomId:  room.ID,
+		Name:    room.Name,
 		Success: true,
+		History: history,
 	}, nil
 }
 
 // 3. Stream Implementation (The heavy lifter)
 func (s *GrpcServer) Stream(stream pb.ChatService_StreamServer) error {
-	// Handshake: Client sends a first message to identify themselves/room?
-	// Or we use context metadata. For simplicity, let's wait for the first message.
+	// 1. Receive the first message to register the user/room stream
 	firstMsg, err := stream.Recv()
 	if err != nil {
 		return err
@@ -120,12 +158,19 @@ func (s *GrpcServer) Stream(stream pb.ChatService_StreamServer) error {
 	s.registerStream(roomID, userID, stream)
 	defer s.deregisterStream(roomID, userID)
 
-	// Broadcast the first message if it contains content
+	// Broadcast the first message (usually a "User Joined" signal or just empty handshake)
 	if firstMsg.MessageContent != "" {
+		// --- PERSISTENCE FIX ---
+		// Convert to internal format and save
+		internalMsg := FromProto(firstMsg)
+		if err := s.appServer.DB.StoreMessage(roomID, internalMsg); err != nil {
+			fmt.Printf("Error saving first message: %v\n", err)
+		}
+		// -----------------------
 		s.Broadcast(firstMsg)
 	}
 
-	// Loop for incoming messages
+	// 2. Main Loop
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
@@ -135,8 +180,14 @@ func (s *GrpcServer) Stream(stream pb.ChatService_StreamServer) error {
 			return err
 		}
 
-		// Logic to save message to DB could go here
-		// s.appServer.DB.StoreMessage(...)
+		// --- PERSISTENCE FIX ---
+		// Save every message to the DB before broadcasting
+		internalMsg := FromProto(msg)
+		if err := s.appServer.DB.StoreMessage(msg.RoomId, internalMsg); err != nil {
+			fmt.Printf("Error saving message: %v\n", err)
+			// Optional: return err to disconnect client, or just log it
+		}
+		// -----------------------
 
 		s.Broadcast(msg)
 	}
@@ -164,7 +215,7 @@ func (s *GrpcServer) deregisterStream(roomID, userID string) {
 func (s *GrpcServer) Broadcast(msg *pb.ChatMessage) {
 	s.streamMu.RLock()
 	defer s.streamMu.RUnlock()
-
+	fmt.Println("Broadcasting message to room:", msg.RoomId, "Content length:", len(msg.MessageContent))
 	roomStreams, ok := s.streams[msg.RoomId]
 	if !ok {
 		return

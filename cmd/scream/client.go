@@ -86,6 +86,7 @@ func (c *APIClient) JoinRoom(roomName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
+	// 1. Call gRPC
 	resp, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{
 		Email:    c.User.Email,
 		RoomName: roomName,
@@ -96,7 +97,19 @@ func (c *APIClient) JoinRoom(roomName string) error {
 
 	c.CurrentRoom = resp
 
-	// Start the stream immediately after joining
+	// 2. Update Local History (Client-side cache)
+	// We mimic what the server just did so the UI is instant
+	exists := false
+	for _, h := range c.User.History {
+		if h == roomName {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		c.User.History = append(c.User.History, roomName)
+	}
+
 	return c.StartStream()
 }
 

@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 )
 
 // Hardcoded keys from application.js
@@ -38,6 +40,7 @@ func GetKeyByName(name string) ([]byte, error) {
 
 // Encrypt encrypts plainText using AES-GCM
 func EncryptMessage(plainText string) (EncryptedData, error) {
+	start := time.Now()
 	keyName, keyBytes, err := GetRandomKey()
 	if err != nil {
 		return EncryptedData{}, err
@@ -59,7 +62,7 @@ func EncryptMessage(plainText string) (EncryptedData, error) {
 	}
 
 	cipherText := gcm.Seal(nil, nonce, []byte(plainText), nil)
-
+	fmt.Println("Encryption took:", time.Since(start))
 	return EncryptedData{
 		KeyName: keyName,
 		Data:    base64.StdEncoding.EncodeToString(cipherText),
