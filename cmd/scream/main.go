@@ -12,8 +12,7 @@ func main() {
 	if err := InitClient(); err != nil {
 		log.Panic("Could not initialize TLS client: " + err.Error())
 	}
-
-	mainApp = app.New()
+	mainApp = app.NewWithID("com.squall.terminal")
 
 	// Apply VFD Theme
 	mainApp.Settings().SetTheme(&vfdTheme{})

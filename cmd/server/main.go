@@ -81,6 +81,7 @@ func main() {
 	grpcServer := grpc.NewServer(
 		grpc.Creds(creds),
 		grpc.UnaryInterceptor(grpcImpl.AuthInterceptor),
+		grpc.StreamInterceptor(grpcImpl.StreamAuthInterceptor),
 	)
 
 	proto.RegisterChatServiceServer(grpcServer, grpcImpl)

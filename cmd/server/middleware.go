@@ -63,3 +63,54 @@ func GetUserFromContext(ctx context.Context) (User, error) {
 	}
 	return user, nil
 }
+
+// StreamAuthInterceptor handles authentication for streaming RPCs (like Chat)
+func (s *GrpcServer) StreamAuthInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	// 1. Get Context from the stream
+	ctx := ss.Context()
+
+	// 2. Extract Token from Metadata
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "metadata is not provided")
+	}
+
+	values := md["authorization"]
+	if len(values) == 0 {
+		return status.Error(codes.Unauthenticated, "authorization token is not provided")
+	}
+
+	token := strings.TrimPrefix(values[0], "Bearer ")
+
+	// 3. Validate Token
+	claims, err := ValidateJWT(token, s.appServer.Key)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "access token is invalid")
+	}
+
+	// 4. Fetch User from DB
+	user, err := s.appServer.DB.GetUser(claims.UserID)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "user not found")
+	}
+
+	// 5. Inject User into Context
+	// We must wrap the ServerStream to modify the Context it returns
+	newCtx := context.WithValue(ctx, userContextKey, user)
+	wrappedStream := &WrappedServerStream{
+		ServerStream: ss,
+		ctx:          newCtx,
+	}
+
+	return handler(srv, wrappedStream)
+}
+
+// Wrapper to override Context()
+type WrappedServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (w *WrappedServerStream) Context() context.Context {
+	return w.ctx
+}
