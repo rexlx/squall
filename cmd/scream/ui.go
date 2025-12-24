@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"image/color"
-	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -13,21 +12,29 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-
-	pb "github.com/rexlx/squall/proto"
 )
 
 var (
 	mainApp fyne.App
 	window  fyne.Window
 
-	// UI Elements for Chat
-	messagesBox   *fyne.Container
-	scrollBox     *container.Scroll
-	channelHeader *widget.Label
+	// Global UI State
+	docTabs     *container.DocTabs
+	openTabs    map[string]*container.TabItem
+	roomBoxes   map[string]*fyne.Container   // Message area for each room
+	roomScrolls map[string]*container.Scroll // Scroll container for each room
 )
 
-// --- VFD Theme Definition ---
+func init() {
+	openTabs = make(map[string]*container.TabItem)
+	roomBoxes = make(map[string]*fyne.Container)
+	roomScrolls = make(map[string]*container.Scroll)
+}
+
+// ---------------------------------------------------------
+// THEME DEFINITION
+// ---------------------------------------------------------
+
 type vfdTheme struct{}
 
 var _ fyne.Theme = (*vfdTheme)(nil)
@@ -59,19 +66,13 @@ func (v vfdTheme) Color(n fyne.ThemeColorName, v2 fyne.ThemeVariant) color.Color
 	return theme.DefaultTheme().Color(n, theme.VariantDark)
 }
 
-func (v vfdTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
-	return theme.DefaultTheme().Icon(n)
-}
+func (v vfdTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
+func (v vfdTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
+func (v vfdTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
 
-func (v vfdTheme) Font(s fyne.TextStyle) fyne.Resource {
-	return theme.DefaultTheme().Font(s)
-}
-
-func (v vfdTheme) Size(n fyne.ThemeSizeName) float32 {
-	return theme.DefaultTheme().Size(n)
-}
-
-// --- UI Construction ---
+// ---------------------------------------------------------
+// LOGIN SCREEN
+// ---------------------------------------------------------
 
 func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	emailEntry := widget.NewEntry()
@@ -99,6 +100,10 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
 
+	// SPACER FIX: Forces the login form to be at least 300px wide
+	spacer := canvas.NewRectangle(color.Transparent)
+	spacer.SetMinSize(fyne.NewSize(300, 0))
+
 	form := container.NewVBox(
 		title,
 		widget.NewSeparator(),
@@ -106,287 +111,270 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 		passEntry,
 		errorLabel,
 		loginBtn,
+		spacer,
 	)
 
 	return container.NewCenter(form)
 }
 
+// ---------------------------------------------------------
+// MAIN APPLICATION SCREEN
+// ---------------------------------------------------------
+
 func MakeMainScreen() fyne.CanvasObject {
-	contentContainer := container.NewMax()
+	// 1. Initialize the Tab Container
+	docTabs = container.NewDocTabs()
+	docTabs.OnClosed = func(item *container.TabItem) {
+		roomName := item.Text
 
-	// ---------------------------------------------------------
-	// 1. Chat View Configuration
-	// ---------------------------------------------------------
-	messagesBox = container.NewVBox()
-	messagesBox.Add(widget.NewLabel("SYSTEM: VFD Terminal Initialized."))
-	scrollBox = container.NewVScroll(messagesBox)
+		// Close Stream
+		Client.LeaveRoom(roomName)
 
-	// Use our custom widget
-	msgInput := NewSubmitEntry()
-	msgInput.SetPlaceHolder("TRANSMIT MESSAGE... (Enter to Send)")
-
-	// Define the shared sending logic
-	doSend := func(content string) {
-		if content == "" {
-			return
-		}
-
-		// Send in background to keep UI responsive
-		go func(t string) {
-			if err := Client.SendMessage(t); err != nil {
-				fmt.Println("Transmission Error:", err)
-			}
-		}(content)
-
-		// Clear the input field immediately
-		msgInput.SetText("")
+		// Cleanup UI Maps
+		delete(openTabs, roomName)
+		delete(roomBoxes, roomName)
+		delete(roomScrolls, roomName)
 	}
 
-	// Link triggers
-	msgInput.OnSubmit = doSend
+	// 2. Sidebar: Saved Rooms & History
+	// We use functions to refresh these lists dynamically.
 
-	// Manual Send Button
-	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
-		doSend(msgInput.Text)
+	// --- SAVED ROOMS ---
+	savedRoomsList := container.NewVBox()
+	refreshSavedRooms := func() {
+		savedRoomsList.Objects = nil
+		if len(Client.User.Rooms) == 0 {
+			savedRoomsList.Add(widget.NewLabel("No saved rooms."))
+		}
+		for _, r := range Client.User.Rooms {
+			rName := r
+			btn := widget.NewButton(rName, func() { loadRoom(rName) })
+			btn.Alignment = widget.ButtonAlignLeading
+			savedRoomsList.Add(btn)
+		}
+		savedRoomsList.Refresh()
+	}
+	refreshSavedRooms()
+
+	// "Add to Saved" Logic
+	addRoomEntry := widget.NewEntry()
+	addRoomEntry.SetPlaceHolder("Room Name...")
+	addRoomBtn := widget.NewButton("SAVE", func() {
+		if addRoomEntry.Text != "" {
+			// Inline "Add to Cache" logic to avoid Client dependency issues
+			roomName := addRoomEntry.Text
+			exists := false
+			for _, r := range Client.User.Rooms {
+				if r == roomName {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				Client.User.Rooms = append(Client.User.Rooms, roomName)
+			}
+			// Refresh UI
+			addRoomEntry.SetText("")
+			refreshSavedRooms()
+		}
 	})
 
-	inputBar := container.NewBorder(nil, nil, nil, sendBtn, msgInput)
-	channelHeader = widget.NewLabelWithStyle(">> AWAITING SIGNAL", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-
-	chatView := container.NewBorder(
-		container.NewPadded(channelHeader),
-		container.NewPadded(inputBar),
-		nil, nil,
-		container.NewPadded(scrollBox),
+	savedSection := container.NewVBox(
+		container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry),
+		savedRoomsList,
 	)
 
-	// ---------------------------------------------------------
-	// 2. Helper Views (History & Rooms)
-	// ---------------------------------------------------------
-
-	// History View
-	showHistory := func() {
-		list := container.NewVBox()
-		list.Add(widget.NewLabelWithStyle(">> ACCESS HISTORY", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		list.Add(widget.NewSeparator())
-
-		if len(Client.User.History) == 0 {
-			list.Add(widget.NewLabel("NO HISTORY."))
-		}
-
-		// Reverse iterate: Show newest (last in list) at top
+	// --- HISTORY ---
+	historyList := container.NewVBox()
+	refreshHistory := func() {
+		historyList.Objects = nil
+		// Iterate backwards to show newest first
 		for i := len(Client.User.History) - 1; i >= 0; i-- {
 			rName := Client.User.History[i]
-			btn := widget.NewButton(rName, func() {
-				loadRoom(rName)
-				contentContainer.Objects = []fyne.CanvasObject{chatView}
-				contentContainer.Refresh()
-			})
+			btn := widget.NewButton(rName, func() { loadRoom(rName) })
 			btn.Alignment = widget.ButtonAlignLeading
-			list.Add(btn)
+			historyList.Add(btn)
 		}
-
-		historyView := container.NewPadded(container.NewVScroll(list))
-		contentContainer.Objects = []fyne.CanvasObject{historyView}
-		contentContainer.Refresh()
+		if len(Client.User.History) == 0 {
+			historyList.Add(widget.NewLabel("No history."))
+		}
+		historyList.Refresh()
 	}
+	refreshHistory()
 
-	showRooms := func() {
-		list := container.NewVBox()
-		list.Add(widget.NewLabelWithStyle(">> SAVED ROOMS", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		list.Add(widget.NewSeparator())
-
-		// UI for Adding a new Room (Saved)
-		addRoomEntry := widget.NewEntry()
-		addRoomEntry.SetPlaceHolder("New Room Name...")
-
-		// Button Action: Load room and switch view immediately
-		addRoomBtn := widget.NewButton("ADD / SAVE", func() {
-			if addRoomEntry.Text != "" {
-				loadRoom(addRoomEntry.Text)
-				addRoomEntry.SetText("")
-
-				// Switch back to chat view
-				contentContainer.Objects = []fyne.CanvasObject{chatView}
-				contentContainer.Refresh()
-			}
-		})
-
-		addBox := container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry)
-		list.Add(addBox)
-		list.Add(widget.NewSeparator())
-
-		// Populate List
-		if len(Client.User.Rooms) == 0 {
-			list.Add(widget.NewLabel("NO SAVED ROOMS."))
-		}
-
-		for _, roomName := range Client.User.Rooms {
-			rName := roomName
-			btn := widget.NewButton(rName, func() {
-				loadRoom(rName)
-				contentContainer.Objects = []fyne.CanvasObject{chatView}
-				contentContainer.Refresh()
-			})
-			btn.Alignment = widget.ButtonAlignLeading
-			list.Add(btn)
-		}
-
-		roomsView := container.NewPadded(container.NewVScroll(list))
-		contentContainer.Objects = []fyne.CanvasObject{roomsView}
-		contentContainer.Refresh()
-	}
-
-	// ---------------------------------------------------------
-	// 3. Sidebar Navigation
-	// ---------------------------------------------------------
-	menuList := widget.NewList(
-		func() int { return 4 },
-		func() fyne.CanvasObject { return widget.NewLabel("Item") },
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			items := []string{"COMM", "PROFILE", "HISTORY", "ROOMS"}
-			o.(*widget.Label).SetText(items[i])
-		},
+	// --- SIDEBAR ACCORDION ---
+	accordion := widget.NewAccordion(
+		widget.NewAccordionItem("SAVED ROOMS", savedSection),
+		widget.NewAccordionItem("HISTORY", historyList),
 	)
+	accordion.Items[0].Open = true // Open Saved by default
 
-	menuList.OnSelected = func(id widget.ListItemID) {
-		switch id {
-		case 0: // Comm
-			contentContainer.Objects = []fyne.CanvasObject{chatView}
-			contentContainer.Refresh()
-		case 1: // Profile (Placeholder)
-			contentContainer.Objects = []fyne.CanvasObject{widget.NewLabel("PROFILE WIP")}
-			contentContainer.Refresh()
-		case 2: // History
-			showHistory()
-		case 3: // Rooms
-			showRooms()
-		default:
-			contentContainer.Objects = []fyne.CanvasObject{chatView}
-			contentContainer.Refresh()
-		}
-	}
-
-	// Sidebar Footer (Join Room directly)
+	// --- SIDEBAR HEADER (Join) ---
 	newRoomEntry := widget.NewEntry()
 	newRoomEntry.SetPlaceHolder("CHANNEL ID")
-
 	joinBtn := widget.NewButton("JOIN", func() {
 		if newRoomEntry.Text != "" {
 			loadRoom(newRoomEntry.Text)
 			newRoomEntry.SetText("")
-			contentContainer.Objects = []fyne.CanvasObject{chatView}
-			contentContainer.Refresh()
 		}
 	})
+	joinHeader := container.NewVBox(
+		widget.NewLabelWithStyle("QUICK JOIN", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		newRoomEntry,
+		joinBtn,
+		widget.NewSeparator(),
+	)
 
-	// Key Loading Button
+	// --- SIDEBAR FOOTER (Load Keys) ---
 	loadKeysBtn := widget.NewButton("LOAD KEY LIB", func() {
 		d := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil {
-				dialog.ShowError(err, window)
-				return
-			}
-			if reader == nil {
+			if err != nil || reader == nil {
 				return
 			}
 			defer reader.Close()
-
-			if reader.URI().Extension() != ".json" {
-				dialog.ShowInformation("Invalid Format", "Please select a .json key library.", window)
-				return
-			}
-
-			if err := LoadKeys(reader); err != nil {
-				dialog.ShowError(fmt.Errorf("failed to load keys: %w", err), window)
-			} else {
-				dialog.ShowInformation("Success", "Key library loaded successfully.", window)
-			}
+			LoadKeys(reader)
 		}, window)
-
 		d.SetFilter(storage.NewExtensionFileFilter([]string{".json"}))
 		d.Show()
 	})
 
-	sidebarInner := container.NewBorder(
-		container.NewVBox(newRoomEntry, joinBtn, widget.NewSeparator()),
-		nil, nil, nil,
-		container.NewPadded(menuList),
-	)
-
-	sidebar := container.NewBorder(
-		widget.NewLabel("MENU"),
-		container.NewVBox(widget.NewSeparator(), loadKeysBtn),
+	// Combine Sidebar
+	sidebarContent := container.NewBorder(
+		joinHeader,
+		loadKeysBtn,
 		nil, nil,
-		sidebarInner,
+		container.NewVScroll(accordion),
 	)
 
-	// ---------------------------------------------------------
-	// 4. Final Layout
-	// ---------------------------------------------------------
-	// Default to chat view
-	contentContainer.Objects = []fyne.CanvasObject{chatView}
-
-	split := container.NewHSplit(sidebar, contentContainer)
+	// 3. Final Layout
+	split := container.NewHSplit(sidebarContent, docTabs)
 	split.SetOffset(0.25)
 
 	return split
 }
 
+// ---------------------------------------------------------
+// ROOM LOGIC
+// ---------------------------------------------------------
+
 func loadRoom(name string) {
-	messagesBox.Objects = nil
-	messagesBox.Refresh()
-
-	if channelHeader != nil {
-		channelHeader.SetText(">> CHANNEL: " + strings.ToUpper(name))
-	}
-
-	err := Client.JoinRoom(name)
-	if err != nil {
-		messagesBox.Add(widget.NewLabel("Error joining channel: " + err.Error()))
+	// 1. If tab exists, focus it
+	if item, ok := openTabs[name]; ok {
+		docTabs.Select(item)
 		return
 	}
 
-	if Client.CurrentRoom.History != nil {
-		for _, m := range Client.CurrentRoom.History {
-			appendMessage(m)
+	// 2. Start Stream in Background
+	go func() {
+		if err := Client.JoinRoom(name); err != nil {
+			fmt.Println("Error joining room:", err)
 		}
+	}()
+
+	// 3. Build UI Components
+	messagesBox := container.NewVBox()
+	messagesBox.Add(widget.NewLabel(fmt.Sprintf("SYSTEM: Connected to %s", name)))
+
+	scroll := container.NewVScroll(messagesBox)
+
+	// Input Field (using custom SubmitEntry)
+	input := NewSubmitEntry()
+	input.SetPlaceHolder(fmt.Sprintf("Message %s...", name))
+
+	doSend := func(txt string) {
+		if txt == "" {
+			return
+		}
+		go func(t string) {
+			Client.SendMessage(name, t)
+		}(txt)
+		input.SetText("")
 	}
+
+	input.OnSubmit = doSend
+	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() { doSend(input.Text) })
+
+	inputBar := container.NewBorder(nil, nil, nil, sendBtn, input)
+
+	tabLayout := container.NewBorder(
+		nil,
+		container.NewPadded(inputBar),
+		nil, nil,
+		container.NewPadded(scroll),
+	)
+
+	// 4. Create and Register Tab
+	tabItem := container.NewTabItem(name, tabLayout)
+	docTabs.Append(tabItem)
+	docTabs.Select(tabItem)
+
+	openTabs[name] = tabItem
+	roomBoxes[name] = messagesBox
+	roomScrolls[name] = scroll
 }
 
-func appendMessage(m *pb.ChatMessage) {
-	content := m.MessageContent
-	isEncrypted := false
-
-	if m.HotSauce != "" {
-		decrypted, err := DecryptMessage(m.MessageContent, m.HotSauce, m.Iv)
-		if err == nil {
-			content = decrypted
-			isEncrypted = true
-		} else {
-			content = "[ENCRYPTION ERROR]"
-		}
-	}
-
-	timeStr := time.Unix(m.Timestamp, 0).Format("15:04:05")
-
-	headerTxt := fmt.Sprintf("[%s] <%s>", timeStr, m.Email)
-	if isEncrypted {
-		headerTxt += " [SECURE]"
-	}
-	header := canvas.NewText(headerTxt, color.RGBA{0, 200, 255, 200})
-	header.TextSize = 10
-
-	body := widget.NewLabel(content)
-	body.Wrapping = fyne.TextWrapWord
-
-	msgContainer := container.NewVBox(header, body)
-	messagesBox.Add(msgContainer)
-	scrollBox.ScrollToBottom()
-}
+// ---------------------------------------------------------
+// MESSAGE HANDLING (Thread-Safe)
+// ---------------------------------------------------------
 
 func ListenForMessages() {
 	for msg := range Client.MsgChan {
-		appendMessage(msg)
+		// Capture variable for closure
+		m := msg
+
+		// FIX: Use fyne.Do() instead of RunOnMainThread
+		fyne.Do(func() {
+			roomName := m.RoomId
+
+			// 1. Locate the UI Box for this room
+			box, ok := roomBoxes[roomName]
+			if !ok {
+				// We received a message for a room we closed or haven't opened yet
+				return
+			}
+			scroll := roomScrolls[roomName]
+
+			// 2. Audible Chime Logic
+			// Check if this room is NOT the currently focused tab
+			if docTabs.Selected() != nil && docTabs.Selected().Text != roomName {
+				// Don't chime for our own messages
+				if m.Email != Client.User.Email {
+					fmt.Print("\a") // System Bell
+				}
+			}
+
+			// 3. Decrypt Content
+			content := m.MessageContent
+			isEncrypted := false
+
+			if m.HotSauce != "" {
+				decrypted, err := DecryptMessage(m.MessageContent, m.HotSauce, m.Iv)
+				if err == nil {
+					content = decrypted
+					isEncrypted = true
+				} else {
+					content = "[ENCRYPTION ERROR]"
+				}
+			}
+
+			// 4. Construct UI Element
+			timeStr := time.Unix(m.Timestamp, 0).Format("15:04:05")
+			headerTxt := fmt.Sprintf("[%s] <%s>", timeStr, m.Email)
+			if isEncrypted {
+				headerTxt += " [SECURE]"
+			}
+
+			header := canvas.NewText(headerTxt, color.RGBA{0, 200, 255, 200})
+			header.TextSize = 10
+
+			body := widget.NewLabel(content)
+			body.Wrapping = fyne.TextWrapWord
+
+			cell := container.NewVBox(header, body)
+
+			// 5. Append and Scroll
+			box.Add(cell)
+			scroll.ScrollToBottom()
+		})
 	}
 }

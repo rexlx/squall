@@ -1,4 +1,3 @@
-// File: cmd/admin-cli/main.go
 package main
 
 import (
@@ -16,28 +15,37 @@ import (
 )
 
 func main() {
-	// Flags for the Admin (the person running the tool)
+	// CLI Flags
 	adminEmail := flag.String("admin", "", "Existing Admin email")
 	adminPass := flag.String("pass", "", "Existing Admin password")
-
-	// Flags for the New User (the account being created)
 	newEmail := flag.String("new-email", "", "New user email")
 	newPass := flag.String("new-pass", "", "New user password")
 	newName := flag.String("new-name", "", "New user name")
-	newRole := flag.String("new-role", "user", "New user role (user/admin)")
-
+	newRole := flag.String("new-role", "user", "New user role (user|admin)")
 	host := flag.String("host", "localhost:8080", "Server host:port")
 
 	flag.Parse()
 
-	if *adminEmail == "" || *newEmail == "" {
-		log.Fatal("Usage: go run cmd/admin-cli/main.go -admin <email> -pass <pass> -new-email <email> -new-pass <pass> ...")
+	if *adminEmail == "" || *adminPass == "" || *newEmail == "" || *newPass == "" {
+		log.Fatal("Usage: go run cmd/admin-cli/main.go -admin <email> -pass <pass> -new-email <target> -new-pass <pass> ...")
 	}
 
-	// 1. Connect to Server
-	// InsecureSkipVerify is used because we are likely using self-signed certs locally
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
-	conn, err := grpc.Dial(*host, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	// 1. Load Client Certificates (mTLS)
+	// We must present a certificate to the server, or it will reject the connection.
+	cert, err := tls.LoadX509KeyPair("data/client-cert.pem", "data/client-key.pem")
+	if err != nil {
+		log.Fatalf("Failed to load client certs: %v", err)
+	}
+
+	// 2. Configure TLS
+	tlsConfig := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true, // Still needed for self-signed server certs
+	}
+	creds := credentials.NewTLS(tlsConfig)
+
+	// 3. Connect to Server
+	conn, err := grpc.Dial(*host, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
@@ -47,22 +55,23 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 2. Login as Admin to get Token
-	fmt.Printf("Authenticating as %s...\n", *adminEmail)
+	// 4. Login as Admin
+	fmt.Printf("Logging in as %s...\n", *adminEmail)
 	loginResp, err := client.Login(ctx, &pb.LoginRequest{
 		Email:    *adminEmail,
 		Password: *adminPass,
 	})
 	if err != nil {
-		log.Fatalf("Login failed: %v", err)
+		log.Fatalf("Login RPC failed: %v", err)
 	}
 	if loginResp.Error {
-		log.Fatalf("Login error: %s", loginResp.Message)
+		log.Fatalf("Login refused: %s", loginResp.Message)
 	}
-	fmt.Println("Authentication successful.")
 
-	// 3. Create the New User
-	// We attach the token to the context metadata so the Middleware can see it
+	fmt.Println("Login successful. Creating new user...")
+
+	// 5. Create New User
+	// Attach token to context
 	md := metadata.Pairs("authorization", loginResp.Token)
 	authCtx := metadata.NewOutgoingContext(ctx, md)
 
@@ -72,14 +81,13 @@ func main() {
 		FirstName: *newName,
 		Role:      *newRole,
 	})
-
 	if err != nil {
-		log.Fatalf("CreateUser failed: %v", err)
+		log.Fatalf("CreateUser RPC failed: %v", err)
 	}
 
 	if createResp.Success {
-		fmt.Printf("\n[SUCCESS] Created User:\n  ID: %s\n  Email: %s\n  Role: %s\n", createResp.UserId, *newEmail, *newRole)
+		fmt.Printf("SUCCESS: User '%s' created (ID: %s)\n", *newEmail, createResp.UserId)
 	} else {
-		fmt.Printf("\n[FAILURE] Server Message: %s\n", createResp.Message)
+		fmt.Printf("FAILED: Server returned error: %s\n", createResp.Message)
 	}
 }

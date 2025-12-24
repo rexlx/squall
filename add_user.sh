@@ -1,9 +1,9 @@
 #!/bin/bash
 
 go run ./cmd/admin-cli/main.go \
-  -admin admin@example.com \
-  -pass secret \
-  -new-email user2@example.com \
-  -new-pass user2pass \
+  -admin rex@aol.com \
+  -pass admin \
+  -new-email user@aol.com \
+  -new-pass admin \
   -new-name "Second User" \
   -new-role user
