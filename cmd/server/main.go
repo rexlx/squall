@@ -78,7 +78,11 @@ func main() {
 	logger.Printf("Server listening on %s (TLS Enabled)", ":8080")
 
 	// 8. Create and Start gRPC Server
-	grpcServer := grpc.NewServer(grpc.Creds(creds))
+	grpcServer := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.UnaryInterceptor(grpcImpl.AuthInterceptor),
+	)
+
 	proto.RegisterChatServiceServer(grpcServer, grpcImpl)
 
 	if err := grpcServer.Serve(lis); err != nil {
@@ -86,10 +90,9 @@ func main() {
 	}
 }
 
-// Helper to create the first user interactively
 func createFirstUser(db Database) {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("--- FIRST USE SETUP ---")
+	fmt.Println("--- FIRST USE SETUP (Creating ADMIN User) ---")
 
 	fmt.Print("Enter Admin Email: ")
 	email, _ := reader.ReadString('\n')
@@ -108,7 +111,6 @@ func createFirstUser(db Database) {
 		os.Exit(1)
 	}
 
-	// Generate a random ID since we don't have a UUID library imported
 	randBytes := make([]byte, 16)
 	rand.Read(randBytes)
 	id := hex.EncodeToString(randBytes)
@@ -117,6 +119,7 @@ func createFirstUser(db Database) {
 		ID:      id,
 		Email:   email,
 		Name:    name,
+		Role:    "admin",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -131,8 +134,8 @@ func createFirstUser(db Database) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Successfully created user:", email)
-	fmt.Println("Setup complete.")
+	fmt.Println("Successfully created ADMIN user:", email)
+	fmt.Println("Setup complete. Restart server without -firstuse flag.")
 }
 
 func loadServerTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {

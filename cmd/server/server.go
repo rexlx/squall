@@ -10,6 +10,7 @@ import (
 )
 
 type Server struct {
+	Queue     chan SaveRequest  `json:"-"`
 	Rooms     map[string]*Room  `json:"rooms"`
 	Address   string            `json:"address"`
 	ID        string            `json:"id"`
@@ -23,9 +24,16 @@ type Server struct {
 	DB        Database          `json:"-"`
 }
 
+type SaveRequest struct {
+	RoomID  string
+	Message internal.Message
+}
+
 func NewServer(address, key string, logger *log.Logger, db Database) *Server {
 	start := time.Now()
+	sQ := make(chan SaveRequest, 100)
 	svr := &Server{
+		Queue:     sQ,
 		Rooms:     make(map[string]*Room),
 		Address:   address,
 		ID:        "server-001",
@@ -46,4 +54,19 @@ func NewServer(address, key string, logger *log.Logger, db Database) *Server {
 	}
 	svr.Gateway.HandleFunc("/login", svr.LoginHandler)
 	return svr
+}
+
+func (s *Server) StartSaveWorker() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case req := <-s.Queue:
+			if err := s.DB.StoreMessage(req.RoomID, req.Message); err != nil {
+				s.Logger.Println("Error saving message to DB:", err)
+			}
+		case <-ticker.C:
+			s.Logger.Println("Save worker heartbeat -", time.Now().Format(time.RFC3339))
+		}
+	}
 }

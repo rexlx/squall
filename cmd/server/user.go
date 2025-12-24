@@ -9,6 +9,7 @@ import (
 )
 
 type User struct {
+	Role     string            `json:"role"`
 	Rooms    []string          `json:"rooms"`
 	History  []string          `json:"history"`
 	ID       string            `json:"id"`

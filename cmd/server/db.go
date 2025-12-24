@@ -46,13 +46,14 @@ func (db *PostgresDB) CreateTables() error {
 			email TEXT UNIQUE NOT NULL,
 			password TEXT,
 			name TEXT,
+			role TEXT,  -- NEW COLUMN
 			created TIMESTAMP,
 			updated TIMESTAMP,
 			rooms JSONB,
 			history JSONB,
 			stats JSONB,
 			posts JSONB
-		);`,
+);`,
 		`CREATE TABLE IF NOT EXISTS rooms (
 			id TEXT PRIMARY KEY,
 			name TEXT,
@@ -100,57 +101,62 @@ func (db *PostgresDB) GetMessage(roomid, messageid string) (internal.Message, er
 	return m, nil
 }
 
+// StoreMessage performs a fast INSERT only.
+// Corrected to use specific fields from your internal.Message struct.
 func (db *PostgresDB) StoreMessage(roomid string, m internal.Message) error {
 	// 1. Insert the new message
+	// Note: internal.Message.Time is a string, matching your DB schema (time_str)
 	query := `INSERT INTO messages (room_id, user_id, email, msg_content, time_str, reply_to, iv, hot_sauce)
 	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
 	_, err := db.Conn.Exec(query, roomid, m.UserID, m.Email, m.Message, m.Time, m.ReplyTo, m.InitialVector, m.HotSauce)
+	return err
+}
+
+// PruneMessages deletes old messages from all rooms in the background.
+// This replaces the inline DELETE subquery that was killing performance.
+func (db *PostgresDB) PruneMessages(keep int) error {
+	// 1. Get all unique room IDs
+	rows, err := db.Conn.Query(`SELECT DISTINCT room_id FROM messages`)
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 
-	// 2. Enforce Max Messages (Pruning)
-	// First, retrieve the limit for this room.
-	var maxMsg int
-	// Default to 1000 if not set or query fails, to prevent infinite growth.
-	limitQuery := `SELECT COALESCE(max_messages, 1000) FROM rooms WHERE id = $1`
-	if err := db.Conn.QueryRow(limitQuery, roomid).Scan(&maxMsg); err != nil {
-		// If we can't get the room config, log it but don't crash.
-		// We can default to a safe limit or skip pruning.
-		log.Printf("Warning: could not fetch max_messages for room %s: %v", roomid, err)
-		maxMsg = 1000
-	}
-
-	if maxMsg > 0 {
-		// Delete messages that are not within the newest 'maxMsg' count.
-		// We use a subquery to find the IDs of the newest N messages,
-		// and delete everything else for this room.
-		pruneQuery := `DELETE FROM messages 
-		               WHERE room_id = $1 AND id NOT IN (
-		                   SELECT id FROM messages 
-		                   WHERE room_id = $1 
-		                   ORDER BY id DESC 
-		                   LIMIT $2
-		               )`
-
-		if _, err := db.Conn.Exec(pruneQuery, roomid, maxMsg); err != nil {
-			// Log pruning errors but don't fail the message send
-			log.Printf("Failed to prune messages for room %s: %v", roomid, err)
+	var rooms []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err == nil {
+			rooms = append(rooms, r)
 		}
 	}
 
+	// 2. Delete messages exceeding the limit for each room
+	// We use the same logic as before, but decoupled from the send loop.
+	query := `DELETE FROM messages 
+	          WHERE room_id = $1 AND id NOT IN (
+	              SELECT id FROM messages 
+	              WHERE room_id = $1 
+	              ORDER BY id DESC 
+	              LIMIT $2
+	          )`
+
+	for _, room := range rooms {
+		if _, err := db.Conn.Exec(query, room, keep); err != nil {
+			log.Printf("Error pruning room %s: %v", room, err)
+		}
+	}
 	return nil
 }
 
 func (db *PostgresDB) GetUser(userid string) (User, error) {
-	query := `SELECT id, email, password, name, created, updated, rooms, history, stats, posts FROM users WHERE id = $1`
+	query := `SELECT id, email, password, name, role, created, updated, rooms, history, stats, posts FROM users WHERE id = $1`
 	row := db.Conn.QueryRow(query, userid)
 
 	var u User
 	var roomsJSON, historyJSON, statsJSON, postsJSON []byte
 
-	err := row.Scan(&u.ID, &u.Email, &u.Password, &u.Name, &u.Created, &u.Updated, &roomsJSON, &historyJSON, &statsJSON, &postsJSON)
+	err := row.Scan(&u.ID, &u.Email, &u.Password, &u.Name, &u.Role, &u.Created, &u.Updated, &roomsJSON, &historyJSON, &statsJSON, &postsJSON)
 	if err != nil {
 		return User{}, err
 	}
@@ -171,20 +177,20 @@ func (db *PostgresDB) StoreUser(u User) error {
 	statsJSON, _ := json.Marshal(u.Stats)
 	postsJSON, _ := json.Marshal(u.Posts)
 
-	// Upsert (Insert or Update on Conflict)
-	query := `INSERT INTO users (id, email, password, name, created, updated, rooms, history, stats, posts)
-	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	          ON CONFLICT (id) DO UPDATE SET
-	          email = EXCLUDED.email,
-	          password = EXCLUDED.password,
-	          name = EXCLUDED.name,
-	          updated = EXCLUDED.updated,
-	          rooms = EXCLUDED.rooms,
-	          history = EXCLUDED.history,
-	          stats = EXCLUDED.stats,
-	          posts = EXCLUDED.posts;`
+	query := `INSERT INTO users (id, email, password, name, role, created, updated, rooms, history, stats, posts)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          ON CONFLICT (id) DO UPDATE SET
+          email = EXCLUDED.email,
+          password = EXCLUDED.password,
+          name = EXCLUDED.name,
+          role = EXCLUDED.role,
+          updated = EXCLUDED.updated,
+          rooms = EXCLUDED.rooms,
+          history = EXCLUDED.history,
+          stats = EXCLUDED.stats,
+          posts = EXCLUDED.posts;`
 
-	_, err := db.Conn.Exec(query, u.ID, u.Email, u.Password, u.Name, u.Created, time.Now(), roomsJSON, historyJSON, statsJSON, postsJSON)
+	_, err := db.Conn.Exec(query, u.ID, u.Email, u.Password, u.Name, u.Role, u.Created, time.Now(), roomsJSON, historyJSON, statsJSON, postsJSON)
 	return err
 }
 

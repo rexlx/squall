@@ -114,26 +114,40 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 func MakeMainScreen() fyne.CanvasObject {
 	contentContainer := container.NewMax()
 
-	// --- 1. Chat View ---
+	// ---------------------------------------------------------
+	// 1. Chat View Configuration
+	// ---------------------------------------------------------
 	messagesBox = container.NewVBox()
 	messagesBox.Add(widget.NewLabel("SYSTEM: VFD Terminal Initialized."))
 	scrollBox = container.NewVScroll(messagesBox)
 
-	msgInput := widget.NewMultiLineEntry()
-	msgInput.SetPlaceHolder("TRANSMIT MESSAGE...")
-	msgInput.Wrapping = fyne.TextWrapWord
+	// Use our custom widget
+	msgInput := NewSubmitEntry()
+	msgInput.SetPlaceHolder("TRANSMIT MESSAGE... (Enter to Send)")
 
-	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
-		if msgInput.Text == "" {
+	// Define the shared sending logic
+	doSend := func(content string) {
+		if content == "" {
 			return
 		}
-		txt := msgInput.Text
+
+		// Send in background to keep UI responsive
 		go func(t string) {
 			if err := Client.SendMessage(t); err != nil {
 				fmt.Println("Transmission Error:", err)
 			}
-		}(txt)
+		}(content)
+
+		// Clear the input field immediately
 		msgInput.SetText("")
+	}
+
+	// Link triggers
+	msgInput.OnSubmit = doSend
+
+	// Manual Send Button
+	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
+		doSend(msgInput.Text)
 	})
 
 	inputBar := container.NewBorder(nil, nil, nil, sendBtn, msgInput)
@@ -146,7 +160,11 @@ func MakeMainScreen() fyne.CanvasObject {
 		container.NewPadded(scrollBox),
 	)
 
-	// --- 2. History View ---
+	// ---------------------------------------------------------
+	// 2. Helper Views (History & Rooms)
+	// ---------------------------------------------------------
+
+	// History View
 	showHistory := func() {
 		list := container.NewVBox()
 		list.Add(widget.NewLabelWithStyle(">> ACCESS HISTORY", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
@@ -173,33 +191,32 @@ func MakeMainScreen() fyne.CanvasObject {
 		contentContainer.Refresh()
 	}
 
-	// --- 3. Rooms View (Saved Channels) ---
 	showRooms := func() {
-		// UI for Adding a new Room
+		list := container.NewVBox()
+		list.Add(widget.NewLabelWithStyle(">> SAVED ROOMS", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+		list.Add(widget.NewSeparator())
+
+		// UI for Adding a new Room (Saved)
 		addRoomEntry := widget.NewEntry()
 		addRoomEntry.SetPlaceHolder("New Room Name...")
 
+		// Button Action: Load room and switch view immediately
 		addRoomBtn := widget.NewButton("ADD / SAVE", func() {
 			if addRoomEntry.Text != "" {
-				// Joining a room automatically saves it to User.Rooms via Client.JoinRoom
 				loadRoom(addRoomEntry.Text)
 				addRoomEntry.SetText("")
-				// Refresh the view to show the new room in the list
-				// We call showRooms recursively to rebuild the list
-				// (Simulating a refresh)
+
+				// Switch back to chat view
 				contentContainer.Objects = []fyne.CanvasObject{chatView}
 				contentContainer.Refresh()
 			}
 		})
 
 		addBox := container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry)
-
-		list := container.NewVBox()
-		list.Add(widget.NewLabelWithStyle(">> SAVED ROOMS", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		list.Add(widget.NewSeparator())
-		list.Add(addBox) // Add the input box at the top
+		list.Add(addBox)
 		list.Add(widget.NewSeparator())
 
+		// Populate List
 		if len(Client.User.Rooms) == 0 {
 			list.Add(widget.NewLabel("NO SAVED ROOMS."))
 		}
@@ -220,7 +237,9 @@ func MakeMainScreen() fyne.CanvasObject {
 		contentContainer.Refresh()
 	}
 
-	// --- 4. Sidebar ---
+	// ---------------------------------------------------------
+	// 3. Sidebar Navigation
+	// ---------------------------------------------------------
 	menuList := widget.NewList(
 		func() int { return 4 },
 		func() fyne.CanvasObject { return widget.NewLabel("Item") },
@@ -229,10 +248,14 @@ func MakeMainScreen() fyne.CanvasObject {
 			o.(*widget.Label).SetText(items[i])
 		},
 	)
+
 	menuList.OnSelected = func(id widget.ListItemID) {
 		switch id {
 		case 0: // Comm
 			contentContainer.Objects = []fyne.CanvasObject{chatView}
+			contentContainer.Refresh()
+		case 1: // Profile (Placeholder)
+			contentContainer.Objects = []fyne.CanvasObject{widget.NewLabel("PROFILE WIP")}
 			contentContainer.Refresh()
 		case 2: // History
 			showHistory()
@@ -244,6 +267,7 @@ func MakeMainScreen() fyne.CanvasObject {
 		}
 	}
 
+	// Sidebar Footer (Join Room directly)
 	newRoomEntry := widget.NewEntry()
 	newRoomEntry.SetPlaceHolder("CHANNEL ID")
 
@@ -256,6 +280,7 @@ func MakeMainScreen() fyne.CanvasObject {
 		}
 	})
 
+	// Key Loading Button
 	loadKeysBtn := widget.NewButton("LOAD KEY LIB", func() {
 		d := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if err != nil {
@@ -296,7 +321,12 @@ func MakeMainScreen() fyne.CanvasObject {
 		sidebarInner,
 	)
 
+	// ---------------------------------------------------------
+	// 4. Final Layout
+	// ---------------------------------------------------------
+	// Default to chat view
 	contentContainer.Objects = []fyne.CanvasObject{chatView}
+
 	split := container.NewHSplit(sidebar, contentContainer)
 	split.SetOffset(0.25)
 

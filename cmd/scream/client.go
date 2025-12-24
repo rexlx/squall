@@ -10,6 +10,7 @@ import (
 	pb "github.com/rexlx/squall/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 )
 
 type APIClient struct {
@@ -56,7 +57,13 @@ func InitClient() error {
 	return nil
 }
 
+func (c *APIClient) getAuthContext(ctx context.Context) context.Context {
+	md := metadata.Pairs("authorization", c.Token)
+	return metadata.NewOutgoingContext(ctx, md)
+}
+
 func (c *APIClient) Login(email, password string) error {
+	// Login is public, no token needed
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
@@ -81,6 +88,10 @@ func (c *APIClient) JoinRoom(roomName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
+	// --- FIX: Attach Token ---
+	ctx = c.getAuthContext(ctx)
+	// -------------------------
+
 	resp, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{
 		Email:    c.User.Email,
 		RoomName: roomName,
@@ -92,17 +103,14 @@ func (c *APIClient) JoinRoom(roomName string) error {
 	c.CurrentRoom = resp
 
 	// Update Local Cache (Deduplicated)
-	// 1. Remove if exists in history
 	var cleanHistory []string
 	for _, h := range c.User.History {
 		if h != roomName {
 			cleanHistory = append(cleanHistory, h)
 		}
 	}
-	// 2. Append to end
 	c.User.History = append(cleanHistory, roomName)
 
-	// 3. Add to Rooms if unique
 	exists := false
 	for _, r := range c.User.Rooms {
 		if r == roomName {
@@ -114,11 +122,19 @@ func (c *APIClient) JoinRoom(roomName string) error {
 		c.User.Rooms = append(c.User.Rooms, roomName)
 	}
 
+	// Restart stream for the new room
 	return c.StartStream()
 }
 
 func (c *APIClient) StartStream() error {
-	stream, err := c.GrpcClient.Stream(context.Background())
+	// Determine context
+	ctx := context.Background()
+
+	// --- FIX: Attach Token ---
+	ctx = c.getAuthContext(ctx)
+	// -------------------------
+
+	stream, err := c.GrpcClient.Stream(ctx)
 	if err != nil {
 		return err
 	}
@@ -157,5 +173,7 @@ func (c *APIClient) SendMessage(text string) error {
 		Timestamp:      time.Now().Unix(),
 	}
 
+	// Note: Send() uses the stream's context, which we already authenticated in StartStream.
+	// However, if stream reconnection logic is added later, ensure it re-authenticates.
 	return c.Stream.Send(msg)
 }
