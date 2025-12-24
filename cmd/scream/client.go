@@ -28,17 +28,15 @@ var Client = &APIClient{
 }
 
 func LoadTLSConfig() (*tls.Config, error) {
-	// 	client-cert.pem	client-key.pem
 	cert, err := tls.LoadX509KeyPair("data/client-cert.pem", "data/client-key.pem")
 	if err != nil {
 		return nil, err
 	}
 	cfh := &tls.Config{
 		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // For testing only; in production, use proper cert verification
+		InsecureSkipVerify: true,
 	}
 	return cfh, nil
-
 }
 
 func InitClient() error {
@@ -47,10 +45,7 @@ func InitClient() error {
 		return err
 	}
 
-	// Create gRPC Transport Credentials
 	creds := credentials.NewTLS(tlsConfig)
-
-	// Dial the Server
 	conn, err := grpc.Dial("localhost:8080", grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
@@ -86,7 +81,6 @@ func (c *APIClient) JoinRoom(roomName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
-	// 1. Call gRPC
 	resp, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{
 		Email:    c.User.Email,
 		RoomName: roomName,
@@ -97,36 +91,44 @@ func (c *APIClient) JoinRoom(roomName string) error {
 
 	c.CurrentRoom = resp
 
-	// 2. Update Local History (Client-side cache)
-	// We mimic what the server just did so the UI is instant
-	exists := false
+	// Update Local Cache (Deduplicated)
+	// 1. Remove if exists in history
+	var cleanHistory []string
 	for _, h := range c.User.History {
-		if h == roomName {
+		if h != roomName {
+			cleanHistory = append(cleanHistory, h)
+		}
+	}
+	// 2. Append to end
+	c.User.History = append(cleanHistory, roomName)
+
+	// 3. Add to Rooms if unique
+	exists := false
+	for _, r := range c.User.Rooms {
+		if r == roomName {
 			exists = true
 			break
 		}
 	}
 	if !exists {
-		c.User.History = append(c.User.History, roomName)
+		c.User.Rooms = append(c.User.Rooms, roomName)
 	}
 
 	return c.StartStream()
 }
 
 func (c *APIClient) StartStream() error {
-	// Establish the bidirectional stream
 	stream, err := c.GrpcClient.Stream(context.Background())
 	if err != nil {
 		return err
 	}
 	c.Stream = stream
 
-	// Start listening routine
 	go func() {
 		for {
 			msg, err := stream.Recv()
 			if err == io.EOF {
-				return // Stream closed
+				return
 			}
 			if err != nil {
 				fmt.Println("Stream Error:", err)
@@ -140,7 +142,7 @@ func (c *APIClient) StartStream() error {
 }
 
 func (c *APIClient) SendMessage(text string) error {
-	enc, err := EncryptMessage(text) // Your existing crypto.go logic
+	enc, err := EncryptMessage(text)
 	if err != nil {
 		return err
 	}

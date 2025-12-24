@@ -5,9 +5,12 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"os"
 	"time"
 )
 
@@ -22,9 +25,57 @@ var EncKeys = []struct {
 	{"heraldic-epacris", "QnyTODU7KLY9taRt7V2sNyRflu97U3LYmnx4uhCsLDM="},
 }
 
+// KeyPair matches the JSON structure from the nomenclator tool.
+type KeyPair struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+// LoadKeys reads a JSON file and appends the keys to the EncKeys list.
+func LoadKeys(reader io.Reader) error {
+	var loadedKeys []KeyPair
+	// The file contains a JSON array of pairs
+	if err := json.NewDecoder(reader).Decode(&loadedKeys); err != nil {
+		return err
+	}
+
+	count := 0
+	for _, lk := range loadedKeys {
+		if lk.Name != "" && lk.Key != "" {
+			EncKeys = append(EncKeys, struct {
+				Name string
+				Key  string
+			}{Name: lk.Name, Key: lk.Key})
+			count++
+		}
+	}
+	fmt.Printf("Loaded %d additional keys\n", count)
+	return nil
+}
+
+// LoadKeysFromFile opens the file and calls LoadKeys
+func LoadKeysFromFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return LoadKeys(f)
+}
+
 func GetRandomKey() (string, []byte, error) {
-	// Pick first for simplicity, or random in full impl
-	k := EncKeys[0]
+	if len(EncKeys) == 0 {
+		return "", nil, errors.New("no keys available")
+	}
+
+	// Generate a cryptographically secure random index
+	max := big.NewInt(int64(len(EncKeys)))
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return "", nil, err
+	}
+
+	k := EncKeys[n.Int64()]
 	keyBytes, err := base64.StdEncoding.DecodeString(k.Key)
 	return k.Name, keyBytes, err
 }

@@ -71,6 +71,8 @@ func (db *PostgresDB) CreateTables() error {
 			hot_sauce TEXT,
 			created_at TIMESTAMP DEFAULT NOW()
 		);`,
+		// NEW: Index for performance
+		`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`,
 	}
 
 	for _, q := range queries {
@@ -99,11 +101,46 @@ func (db *PostgresDB) GetMessage(roomid, messageid string) (internal.Message, er
 }
 
 func (db *PostgresDB) StoreMessage(roomid string, m internal.Message) error {
+	// 1. Insert the new message
 	query := `INSERT INTO messages (room_id, user_id, email, msg_content, time_str, reply_to, iv, hot_sauce)
 	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
 	_, err := db.Conn.Exec(query, roomid, m.UserID, m.Email, m.Message, m.Time, m.ReplyTo, m.InitialVector, m.HotSauce)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 2. Enforce Max Messages (Pruning)
+	// First, retrieve the limit for this room.
+	var maxMsg int
+	// Default to 1000 if not set or query fails, to prevent infinite growth.
+	limitQuery := `SELECT COALESCE(max_messages, 1000) FROM rooms WHERE id = $1`
+	if err := db.Conn.QueryRow(limitQuery, roomid).Scan(&maxMsg); err != nil {
+		// If we can't get the room config, log it but don't crash.
+		// We can default to a safe limit or skip pruning.
+		log.Printf("Warning: could not fetch max_messages for room %s: %v", roomid, err)
+		maxMsg = 1000
+	}
+
+	if maxMsg > 0 {
+		// Delete messages that are not within the newest 'maxMsg' count.
+		// We use a subquery to find the IDs of the newest N messages,
+		// and delete everything else for this room.
+		pruneQuery := `DELETE FROM messages 
+		               WHERE room_id = $1 AND id NOT IN (
+		                   SELECT id FROM messages 
+		                   WHERE room_id = $1 
+		                   ORDER BY id DESC 
+		                   LIMIT $2
+		               )`
+
+		if _, err := db.Conn.Exec(pruneQuery, roomid, maxMsg); err != nil {
+			// Log pruning errors but don't fail the message send
+			log.Printf("Failed to prune messages for room %s: %v", roomid, err)
+		}
+	}
+
+	return nil
 }
 
 func (db *PostgresDB) GetUser(userid string) (User, error) {

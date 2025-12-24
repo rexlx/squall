@@ -10,12 +10,15 @@ import (
 func main() {
 	// 1. Initialize the TLS Client immediately on startup
 	if err := InitClient(); err != nil {
-		// If we can't load certs, crash immediately with an error message
 		log.Panic("Could not initialize TLS client: " + err.Error())
 	}
 
 	mainApp = app.New()
-	window = mainApp.NewWindow("Scream-NG (Secure)")
+
+	// Apply VFD Theme
+	mainApp.Settings().SetTheme(&vfdTheme{})
+
+	window = mainApp.NewWindow("Scream-NG (VFD Terminal)")
 	window.Resize(fyne.NewSize(1000, 800))
 
 	// Start listener routine
@@ -23,7 +26,6 @@ func main() {
 
 	// Show Login Screen initially
 	window.SetContent(MakeLoginScreen(func() {
-		// On success, switch to Main Screen
 		window.SetContent(MakeMainScreen())
 	}))
 
