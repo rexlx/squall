@@ -66,7 +66,27 @@ func (s *Server) StartSaveWorker() {
 				s.Logger.Println("Error saving message to DB:", err)
 			}
 		case <-ticker.C:
-			s.Logger.Println("Save worker heartbeat -", time.Now().Format(time.RFC3339))
+			s.Logger.Println("Save Worker Heartbeat - Queue Length:", len(s.Queue))
+		}
+	}
+}
+
+func (s *Server) StartPruneWorker(interval time.Duration, keep int) {
+	if interval <= 0 {
+		s.Logger.Println("Pruning disabled (interval 0)")
+		return
+	}
+	s.Logger.Printf("Prune worker started (Every %s, keep %d)", interval, keep)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		start := time.Now()
+		s.Logger.Println("Starting Prune...")
+		if err := s.DB.PruneMessages(keep); err != nil {
+			s.Logger.Printf("Prune failed: %v", err)
+		} else {
+			s.Logger.Printf("Prune finished in %v", time.Since(start))
 		}
 	}
 }

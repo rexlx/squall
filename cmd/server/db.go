@@ -20,6 +20,7 @@ type Database interface {
 	GetRoom(roomid string) (Room, error)
 	StoreRoom(room Room) error
 	GetUserByEmail(email string) (User, error)
+	PruneMessages(keep int) error
 }
 
 type PostgresDB struct {

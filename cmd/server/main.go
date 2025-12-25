@@ -4,11 +4,9 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -20,76 +18,110 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
-// DSN for Postgres connection
-var dsn = "user=rxlx password=thereISnosp0)n host=192.168.86.120 dbname=chaps sslmode=disable"
+// --- MAIN SERVER LOGIC ---
 
 func main() {
-	// Define flags
+	// 1. Parse Flags
 	firstUse := flag.Bool("firstuse", false, "Initialize the server by creating the first admin user")
+	// Note: We removed the prune-freq flag for this production-ready file,
+	// but you can add it back if you kept the worker logic from the benchmark discussion.
 	flag.Parse()
 
-	// 1. Setup Logging
-	file, err := os.OpenFile("thisserver.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Println("Error opening log file:", err)
-		os.Exit(1)
-	}
-	defer file.Close()
-	logger := log.New(file, "SERVER: ", log.LstdFlags|log.Lshortfile)
+	// 2. Setup Logging
+	// For containerized/public deploys, logging to Stdout is preferred over a file
+	logger := log.New(os.Stdout, "SERVER: ", log.LstdFlags|log.Lshortfile)
 
-	// 2. Connect to Database
+	// 3. Load Secrets from Environment (Security Fix)
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		// Fallback for local dev convenience, but warn heavily
+		logger.Println("WARNING: DB_DSN not set, using default insecure local DSN")
+		dsn = "user=rxlx password=thereISnosp0)n host=localhost dbname=chaps sslmode=disable"
+	}
+
+	jwtKey := os.Getenv("JWT_SECRET")
+	if jwtKey == "" {
+		logger.Fatal("CRITICAL: JWT_SECRET environment variable must be set.")
+	}
+
+	// 4. Connect to Database
 	db, err := NewPostgresDB(dsn)
 	if err != nil {
 		logger.Fatal("Failed to connect to database:", err)
 	}
-
-	// Ensure Tables Exist
 	if err = db.CreateTables(); err != nil {
 		logger.Fatal("Failed to create tables:", err)
 	}
-	logger.Println("Database connected and tables verified.")
+	logger.Println("Database connected.")
 
-	// 3. Handle First Use Flag
+	// 5. Handle First Use
 	if *firstUse {
 		createFirstUser(db)
-		// We exit after firstuse setup to ensure clean state,
-		// remove this if you want to continue starting the server immediately.
 		os.Exit(0)
 	}
 
-	// 4. Initialize Application Logic
-	appServer := NewServer("0.0.0.0:8080", "system-key", logger, db)
+	// 6. Initialize Application Logic
+	appServer := NewServer("0.0.0.0:8080", jwtKey, logger, db)
+	// Start the SaveWorker (assuming you kept the simplified worker from previous discussions)
+	go appServer.StartSaveWorker()
 
-	// 5. Initialize gRPC Implementation
 	grpcImpl := NewGrpcServer(appServer)
 
-	// 6. Load TLS Credentials (mTLS)
-	tlsConfig, err := loadServerTLSConfig("data/server-cert.pem", "data/server-key.pem", "data/ca-cert.pem")
-	if err != nil {
-		logger.Fatal("Failed to load TLS keys:", err)
-	}
-	creds := credentials.NewTLS(tlsConfig)
+	// 7. Initialize Rate Limiter
+	// Allow 5 requests per second, with a burst of 10
+	limiter := NewRateLimiter(5, 10)
 
-	// 7. Setup Listener
-	lis, err := net.Listen("tcp", ":8080")
+	// 8. Configure gRPC Options (TLS vs No-TLS)
+	var opts []grpc.ServerOption
+
+	if os.Getenv("DISABLE_TLS") == "true" {
+		logger.Println("Running in NO-TLS mode (SSL Termination expected upstream)")
+		// No credentials added, server runs in h2c/plaintext mode
+	} else {
+		logger.Println("Running in TLS mode")
+		// Load certs for standard HTTPS (No mTLS)
+		// Ensure these files exist in your container/server
+		tlsConfig, err := loadServerTLSConfig("data/server-cert.pem", "data/server-key.pem")
+		if err != nil {
+			logger.Fatal("Failed to load TLS keys:", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		opts = append(opts, grpc.Creds(creds))
+	}
+
+	// 9. Chain Interceptors (Rate Limit -> Auth)
+	opts = append(opts,
+		grpc.ChainUnaryInterceptor(
+			limiter.UnaryInterceptor, // 1. Check Rate Limit
+			grpcImpl.AuthInterceptor, // 2. Check Auth Token
+		),
+		grpc.ChainStreamInterceptor(
+			limiter.StreamInterceptor,      // 1. Check Rate Limit
+			grpcImpl.StreamAuthInterceptor, // 2. Check Auth Token
+		),
+	)
+
+	// 10. Setup Listener
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		logger.Fatal("Failed to listen:", err)
 	}
-	logger.Printf("Server listening on %s (TLS Enabled)", ":8080")
+	logger.Printf("Server listening on port %s", port)
 
-	// 8. Create and Start gRPC Server
-	grpcServer := grpc.NewServer(
-		grpc.Creds(creds),
-		grpc.UnaryInterceptor(grpcImpl.AuthInterceptor),
-		grpc.StreamInterceptor(grpcImpl.StreamAuthInterceptor),
-	)
-
+	// 11. Start Server
+	grpcServer := grpc.NewServer(opts...)
 	proto.RegisterChatServiceServer(grpcServer, grpcImpl)
 
 	if err := grpcServer.Serve(lis); err != nil {
 		logger.Fatal("Failed to serve gRPC:", err)
 	}
 }
+
+// --- HELPER FUNCTIONS ---
 
 func createFirstUser(db Database) {
 	reader := bufio.NewReader(os.Stdin)
@@ -139,25 +171,17 @@ func createFirstUser(db Database) {
 	fmt.Println("Setup complete. Restart server without -firstuse flag.")
 }
 
-func loadServerTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
+// loadServerTLSConfig loads keys for standard HTTPS (Server-Side TLS only)
+func loadServerTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
 
-	caCert, err := ioutil.ReadFile(caFile)
-	if err != nil {
-		return nil, err
-	}
-	caCertPool := x509.NewCertPool()
-	if !caCertPool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("failed to append CA cert")
-	}
-
 	config := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
-		ClientCAs:    caCertPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		// Removed ClientCAs and ClientAuth to allow public connections
+		// This makes it a standard HTTPS/TLS server
 	}
 
 	return config, nil

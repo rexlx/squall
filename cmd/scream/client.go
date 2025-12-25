@@ -55,7 +55,7 @@ func InitClient() error {
 	}
 
 	creds := credentials.NewTLS(tlsConfig)
-	conn, err := grpc.Dial("neo.nullferatu.com:8085", grpc.WithTransportCredentials(creds))
+	conn, err := grpc.Dial("localhost:8080", grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
 	}
@@ -92,13 +92,14 @@ func (c *APIClient) getAuthContext(ctx context.Context) context.Context {
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-// JoinRoom now just calls the RPC and starts the stream
+// JoinRoom calls the RPC, processes history, and starts the stream
 func (c *APIClient) JoinRoom(roomName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	ctx = c.getAuthContext(ctx)
 
-	_, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{
+	// 1. Capture the response (instead of _)
+	resp, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{
 		Email:    c.User.Email,
 		RoomName: roomName,
 	})
@@ -106,9 +107,19 @@ func (c *APIClient) JoinRoom(roomName string) error {
 		return err
 	}
 
-	// Update local cache of rooms (for the sidebar list)
+	// 2. Process History
+	// The server sends history (Oldest -> Newest). We push them to the
+	// MsgChan just like real-time messages so the UI renders them.
+	if len(resp.History) > 0 {
+		for _, msg := range resp.History {
+			c.MsgChan <- msg
+		}
+	}
+
+	// 3. Update local cache (Sidebar)
 	c.AddRoomToCache(roomName)
 
+	// 4. Start Real-time Stream
 	return c.StartStream(roomName)
 }
 
