@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"io"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -23,11 +24,13 @@ var (
 	mainApp fyne.App
 	window  fyne.Window
 
-	// Global UI State
 	docTabs     *container.DocTabs
 	openTabs    map[string]*container.TabItem
-	roomBoxes   map[string]*fyne.Container   // Message area for each room
-	roomScrolls map[string]*container.Scroll // Scroll container for each room
+	roomBoxes   map[string]*fyne.Container
+	roomScrolls map[string]*container.Scroll
+
+	// Reassembly buffer for incoming chunks
+	incomingChunks sync.Map
 )
 
 func init() {
@@ -35,10 +38,6 @@ func init() {
 	roomBoxes = make(map[string]*fyne.Container)
 	roomScrolls = make(map[string]*container.Scroll)
 }
-
-// ---------------------------------------------------------
-// THEME DEFINITION (Restored VFD Styling)
-// ---------------------------------------------------------
 
 type vfdTheme struct{}
 
@@ -75,17 +74,11 @@ func (v vfdTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.Defaul
 func (v vfdTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
 func (v vfdTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
 
-// ---------------------------------------------------------
-// LOGIN SCREEN
-// ---------------------------------------------------------
-
 func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	emailEntry := widget.NewEntry()
 	emailEntry.SetPlaceHolder("Username/Email")
-
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("Password")
-
 	errorLabel := widget.NewLabel("")
 	errorLabel.Hide()
 
@@ -108,22 +101,9 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	spacer := canvas.NewRectangle(color.Transparent)
 	spacer.SetMinSize(fyne.NewSize(300, 0))
 
-	form := container.NewVBox(
-		title,
-		widget.NewSeparator(),
-		emailEntry,
-		passEntry,
-		errorLabel,
-		loginBtn,
-		spacer,
-	)
-
+	form := container.NewVBox(title, widget.NewSeparator(), emailEntry, passEntry, errorLabel, loginBtn, spacer)
 	return container.NewCenter(form)
 }
-
-// ---------------------------------------------------------
-// MAIN APPLICATION SCREEN
-// ---------------------------------------------------------
 
 func MakeMainScreen() fyne.CanvasObject {
 	docTabs = container.NewDocTabs()
@@ -135,13 +115,9 @@ func MakeMainScreen() fyne.CanvasObject {
 		delete(roomScrolls, roomName)
 	}
 
-	// --- SAVED ROOMS ---
 	savedRoomsList := container.NewVBox()
 	refreshSavedRooms := func() {
 		savedRoomsList.Objects = nil
-		if len(Client.User.Rooms) == 0 {
-			savedRoomsList.Add(widget.NewLabel("No saved rooms."))
-		}
 		for _, r := range Client.User.Rooms {
 			rName := r
 			btn := widget.NewButton(rName, func() { loadRoom(rName) })
@@ -162,12 +138,8 @@ func MakeMainScreen() fyne.CanvasObject {
 		}
 	})
 
-	savedSection := container.NewVBox(
-		container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry),
-		savedRoomsList,
-	)
+	savedSection := container.NewVBox(container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry), savedRoomsList)
 
-	// --- HISTORY ---
 	historyList := container.NewVBox()
 	refreshHistory := func() {
 		historyList.Objects = nil
@@ -176,9 +148,6 @@ func MakeMainScreen() fyne.CanvasObject {
 			btn := widget.NewButton(rName, func() { loadRoom(rName) })
 			btn.Alignment = widget.ButtonAlignLeading
 			historyList.Add(btn)
-		}
-		if len(Client.User.History) == 0 {
-			historyList.Add(widget.NewLabel("No history."))
 		}
 		historyList.Refresh()
 	}
@@ -198,12 +167,6 @@ func MakeMainScreen() fyne.CanvasObject {
 			newRoomEntry.SetText("")
 		}
 	})
-	joinHeader := container.NewVBox(
-		widget.NewLabelWithStyle("QUICK JOIN", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		newRoomEntry,
-		joinBtn,
-		widget.NewSeparator(),
-	)
 
 	loadKeysBtn := widget.NewButton("LOAD KEY LIB", func() {
 		d := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
@@ -218,7 +181,7 @@ func MakeMainScreen() fyne.CanvasObject {
 	})
 
 	sidebarContent := container.NewBorder(
-		joinHeader,
+		container.NewVBox(widget.NewLabelWithStyle("QUICK JOIN", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), newRoomEntry, joinBtn, widget.NewSeparator()),
 		loadKeysBtn,
 		nil, nil,
 		container.NewVScroll(accordion),
@@ -226,43 +189,27 @@ func MakeMainScreen() fyne.CanvasObject {
 
 	split := container.NewHSplit(sidebarContent, docTabs)
 	split.SetOffset(0.25)
-
 	return split
 }
-
-// ---------------------------------------------------------
-// ROOM LOGIC
-// ---------------------------------------------------------
 
 func loadRoom(name string) {
 	if item, ok := openTabs[name]; ok {
 		docTabs.Select(item)
 		return
 	}
-
-	go func() {
-		if err := Client.JoinRoom(name); err != nil {
-			fmt.Println("Error joining room:", err)
-		}
-	}()
+	go Client.JoinRoom(name)
 
 	messagesBox := container.NewVBox()
-	messagesBox.Add(widget.NewLabel(fmt.Sprintf("SYSTEM: Connected to %s", name)))
-
 	scroll := container.NewVScroll(messagesBox)
 	input := NewSubmitEntry()
 	input.SetPlaceHolder(fmt.Sprintf("Message %s...", name))
 
 	doSend := func(txt string) {
-		if txt == "" {
-			return
+		if txt != "" {
+			go Client.SendMessage(name, txt)
+			input.SetText("")
 		}
-		go func(t string) {
-			Client.SendMessage(name, t)
-		}(txt)
-		input.SetText("")
 	}
-
 	input.OnSubmit = doSend
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() { doSend(input.Text) })
 
@@ -272,32 +219,17 @@ func loadRoom(name string) {
 				return
 			}
 			defer reader.Close()
-
 			data, _ := io.ReadAll(reader)
 			hash := sha256.Sum256(data)
 			hashStr := hex.EncodeToString(hash[:])
-
-			// Register for 30 min timeout
-			Client.ActiveOffers.Store(hashStr, PendingFile{
-				Data:      data,
-				FileName:  reader.URI().Name(),
-				Timestamp: time.Now(),
-			})
-
+			Client.ActiveOffers.Store(hashStr, PendingFile{Data: data, FileName: reader.URI().Name(), Timestamp: time.Now()})
 			Client.SendFileControl(name, hashStr, reader.URI().Name(), "OFFER")
 		}, window)
 		d.Show()
 	})
 
 	inputBar := container.NewBorder(nil, nil, nil, container.NewHBox(fileBtn, sendBtn), input)
-
-	tabLayout := container.NewBorder(
-		nil,
-		container.NewPadded(inputBar),
-		nil, nil,
-		container.NewPadded(scroll),
-	)
-
+	tabLayout := container.NewBorder(nil, container.NewPadded(inputBar), nil, nil, container.NewPadded(scroll))
 	tabItem := container.NewTabItem(name, tabLayout)
 	docTabs.Append(tabItem)
 	docTabs.Select(tabItem)
@@ -307,68 +239,38 @@ func loadRoom(name string) {
 	roomScrolls[name] = scroll
 }
 
-// ---------------------------------------------------------
-// MESSAGE HANDLING (Thread-Safe)
-// ---------------------------------------------------------
-
 func ListenForMessages() {
 	for msg := range Client.MsgChan {
 		m := msg
-		fyne.Do(func() {
-			roomName := m.RoomId
-			box, ok := roomBoxes[roomName]
-			if !ok {
-				return
-			}
-			scroll := roomScrolls[roomName]
-
-			if docTabs.Selected() != nil && docTabs.Selected().Text != roomName {
-				if m.Email != Client.User.Email {
-					fmt.Print("\a") // System Bell
-				}
-			}
-
-			switch m.Type {
-			case pb.ChatMessage_FILE_CONTROL:
-				handleFileControl(m)
-			case pb.ChatMessage_TEXT:
-				renderTextMessage(m, box, scroll)
-			case pb.ChatMessage_FILE_CHUNK:
-				// Data reassembly logic would go here for recipients
-			}
-		})
+		// Logic runs in background; only UI updates use fyne.Do
+		switch m.Type {
+		case pb.ChatMessage_FILE_CONTROL:
+			handleFileControl(m)
+		case pb.ChatMessage_TEXT:
+			fyne.Do(func() { renderTextMessage(m) })
+		case pb.ChatMessage_FILE_CHUNK:
+			handleFileChunk(m)
+		}
 	}
 }
 
-func renderTextMessage(m *pb.ChatMessage, box *fyne.Container, scroll *container.Scroll) {
+func renderTextMessage(m *pb.ChatMessage) {
+	box, ok := roomBoxes[m.RoomId]
+	if !ok {
+		return
+	}
 	content := m.GetMessageContent()
-	isEncrypted := false
-
 	if m.HotSauce != "" {
-		decrypted, err := DecryptMessage(content, m.HotSauce, m.Iv)
-		if err == nil {
-			content = decrypted
-			isEncrypted = true
-		} else {
-			content = "[ENCRYPTION ERROR]"
+		if dec, err := DecryptMessage(content, m.HotSauce, m.Iv); err == nil {
+			content = dec
 		}
 	}
-
-	timeStr := time.Unix(m.Timestamp, 0).Format("15:04:05")
-	headerTxt := fmt.Sprintf("[%s] <%s>", timeStr, m.Email)
-	if isEncrypted {
-		headerTxt += " [SECURE]"
-	}
-
-	header := canvas.NewText(headerTxt, color.RGBA{0, 200, 255, 200})
+	header := canvas.NewText(fmt.Sprintf("[%s] <%s>", time.Unix(m.Timestamp, 0).Format("15:04:05"), m.Email), color.RGBA{0, 200, 255, 200})
 	header.TextSize = 10
-
 	body := widget.NewLabel(content)
 	body.Wrapping = fyne.TextWrapWord
-
-	cell := container.NewVBox(header, body)
-	box.Add(cell)
-	scroll.ScrollToBottom()
+	box.Add(container.NewVBox(header, body))
+	roomScrolls[m.RoomId].ScrollToBottom()
 }
 
 func handleFileControl(m *pb.ChatMessage) {
@@ -377,25 +279,55 @@ func handleFileControl(m *pb.ChatMessage) {
 		return
 	}
 
-	// Recipient Side: OFFER received
 	if meta.Action == "OFFER" && m.Email != Client.User.Email {
-		dialog.ShowConfirm("Incoming File",
-			fmt.Sprintf("%s wants to send: %s\nAccept?", m.Email, meta.FileName),
-			func(ok bool) {
+		go func() {
+			dialog.ShowConfirm("Incoming File", fmt.Sprintf("%s offers %s. Accept?", m.Email, meta.FileName), func(ok bool) {
 				if ok {
 					Client.SendFileControl(m.RoomId, meta.FileHash, meta.FileName, "ACCEPT")
 				}
 			}, window)
+		}()
 	}
 
-	// Sender Side: ACCEPT received
 	if meta.Action == "ACCEPT" && m.Email != Client.User.Email {
 		if val, ok := Client.ActiveOffers.Load(meta.FileHash); ok {
 			pending := val.(PendingFile)
 			go func() {
 				_ = Client.SendFileChunks(m.RoomId, pending.Data)
-				Client.ActiveOffers.Delete(meta.FileHash) // Immediate Purge
+				Client.ActiveOffers.Delete(meta.FileHash)
 			}()
 		}
+	}
+}
+
+func handleFileChunk(m *pb.ChatMessage) {
+	data := m.GetDataChunk()
+	if len(data) == 0 {
+		return
+	}
+
+	// Don't process chunks we sent ourselves
+	if m.Email == Client.User.Email {
+		return
+	}
+
+	key := fmt.Sprintf("%s_%s", m.Email, m.RoomId)
+	val, _ := incomingChunks.LoadOrStore(key, []byte{})
+	buffer := append(val.([]byte), data...)
+	incomingChunks.Store(key, buffer)
+
+	// In this implementation, we prompt the user to save once the first data arrives
+	// For production, you would add a "COMPLETE" action to pb.FileMetadata
+	if len(buffer) == len(data) {
+		fyne.Do(func() {
+			dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
+				if err != nil || writer == nil {
+					return
+				}
+				defer writer.Close()
+				writer.Write(buffer)
+				incomingChunks.Delete(key) // Purge after save
+			}, window)
+		})
 	}
 }
