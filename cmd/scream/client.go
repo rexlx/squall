@@ -14,38 +14,39 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+type PendingFile struct {
+	Data      []byte
+	FileName  string
+	Timestamp time.Time
+}
+
 type APIClient struct {
-	GrpcClient pb.ChatServiceClient
-	Conn       *grpc.ClientConn
-
-	// Map of RoomID -> Stream
-	Streams map[string]pb.ChatService_StreamClient
-	// Map of RoomID -> CancelFunc (to stop the receiving goroutine/context)
-	Cancels map[string]context.CancelFunc
-	mu      sync.RWMutex
-
-	Token   string
-	User    *pb.User
-	MsgChan chan *pb.ChatMessage
+	GrpcClient   pb.ChatServiceClient
+	Conn         *grpc.ClientConn
+	Streams      map[string]pb.ChatService_StreamClient
+	Cancels      map[string]context.CancelFunc
+	mu           sync.RWMutex
+	Token        string
+	User         *pb.User
+	MsgChan      chan *pb.ChatMessage
+	ActiveOffers sync.Map // Map[string]PendingFile (Key: FileHash)
 }
 
 var Client = &APIClient{
-	MsgChan: make(chan *pb.ChatMessage, 100), // Buffered for safety
+	MsgChan: make(chan *pb.ChatMessage, 100),
 	Streams: make(map[string]pb.ChatService_StreamClient),
 	Cancels: make(map[string]context.CancelFunc),
 }
 
 func LoadTLSConfig() (*tls.Config, error) {
-	// Adjust path if needed, or use embedded certs
 	cert, err := tls.LoadX509KeyPair("data/client-cert.pem", "data/client-key.pem")
 	if err != nil {
 		return nil, err
 	}
-	cfh := &tls.Config{
+	return &tls.Config{
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true,
-	}
-	return cfh, nil
+	}, nil
 }
 
 func InitClient() error {
@@ -53,13 +54,11 @@ func InitClient() error {
 	if err != nil {
 		return err
 	}
-
 	creds := credentials.NewTLS(tlsConfig)
-	conn, err := grpc.Dial("localhost:8080", grpc.WithTransportCredentials(creds))
+	conn, err := grpc.Dial("neo.nullferatu.com:8085", grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
 	}
-
 	Client.Conn = conn
 	Client.GrpcClient = pb.NewChatServiceClient(conn)
 	return nil
@@ -68,58 +67,37 @@ func InitClient() error {
 func (c *APIClient) Login(email, password string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-
-	resp, err := c.GrpcClient.Login(ctx, &pb.LoginRequest{
-		Email:    email,
-		Password: password,
-	})
+	resp, err := c.GrpcClient.Login(ctx, &pb.LoginRequest{Email: email, Password: password})
 	if err != nil {
 		return err
 	}
-
 	if resp.Error {
 		return fmt.Errorf("login failed: %s", resp.Message)
 	}
-
 	c.User = resp.User
 	c.Token = resp.Token
 	return nil
 }
 
-// Helper to attach JWT
 func (c *APIClient) getAuthContext(ctx context.Context) context.Context {
 	md := metadata.Pairs("authorization", c.Token)
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-// JoinRoom calls the RPC, processes history, and starts the stream
 func (c *APIClient) JoinRoom(roomName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	ctx = c.getAuthContext(ctx)
-
-	// 1. Capture the response (instead of _)
-	resp, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{
-		Email:    c.User.Email,
-		RoomName: roomName,
-	})
+	resp, err := c.GrpcClient.JoinRoom(ctx, &pb.JoinRoomRequest{Email: c.User.Email, RoomName: roomName})
 	if err != nil {
 		return err
 	}
-
-	// 2. Process History
-	// The server sends history (Oldest -> Newest). We push them to the
-	// MsgChan just like real-time messages so the UI renders them.
 	if len(resp.History) > 0 {
 		for _, msg := range resp.History {
 			c.MsgChan <- msg
 		}
 	}
-
-	// 3. Update local cache (Sidebar)
 	c.AddRoomToCache(roomName)
-
-	// 4. Start Real-time Stream
 	return c.StartStream(roomName)
 }
 
@@ -136,13 +114,11 @@ func (c *APIClient) AddRoomToCache(roomName string) {
 	}
 }
 
-// LeaveRoom closes the stream and cancels the context
 func (c *APIClient) LeaveRoom(roomName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if cancel, ok := c.Cancels[roomName]; ok {
-		cancel() // Stop the receive loop
+		cancel()
 	}
 	delete(c.Cancels, roomName)
 	delete(c.Streams, roomName)
@@ -151,57 +127,46 @@ func (c *APIClient) LeaveRoom(roomName string) {
 func (c *APIClient) StartStream(roomName string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	// 1. Skip if already connected
 	if _, ok := c.Streams[roomName]; ok {
 		return nil
 	}
-
-	// 2. Create Context with Cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = c.getAuthContext(ctx)
-
 	stream, err := c.GrpcClient.Stream(ctx)
 	if err != nil {
 		cancel()
 		return err
 	}
 
-	// 3. Handshake: Send first packet with RoomID
 	handshake := &pb.ChatMessage{
-		UserId:         c.User.Id,
-		RoomId:         roomName,
-		MessageContent: "", // Empty content = Handshake
+		UserId: c.User.Id,
+		RoomId: roomName,
+		Type:   pb.ChatMessage_TEXT,
+		Payload: &pb.ChatMessage_MessageContent{
+			MessageContent: "",
+		},
 	}
 	if err := stream.Send(handshake); err != nil {
 		cancel()
 		return err
 	}
 
-	// 4. Store Stream
 	c.Streams[roomName] = stream
 	c.Cancels[roomName] = cancel
 
-	// 5. Start Receive Loop
 	go func(rName string, s pb.ChatService_StreamClient) {
-		defer cancel() // Cleanup on exit
+		defer cancel()
 		for {
 			msg, err := s.Recv()
-			if err == io.EOF {
+			if err == io.EOF || ctx.Err() == context.Canceled {
 				return
 			}
 			if err != nil {
-				// Expected error when we close the tab
-				if ctx.Err() == context.Canceled {
-					return
-				}
-				fmt.Printf("Stream Error [%s]: %v\n", rName, err)
 				return
 			}
 			c.MsgChan <- msg
 		}
 	}(roomName, stream)
-
 	return nil
 }
 
@@ -209,7 +174,6 @@ func (c *APIClient) SendMessage(roomName, text string) error {
 	c.mu.RLock()
 	stream, ok := c.Streams[roomName]
 	c.mu.RUnlock()
-
 	if !ok {
 		return fmt.Errorf("not connected to room %s", roomName)
 	}
@@ -220,14 +184,87 @@ func (c *APIClient) SendMessage(roomName, text string) error {
 	}
 
 	msg := &pb.ChatMessage{
-		UserId:         c.User.Id,
-		Email:          c.User.Email,
-		RoomId:         roomName,
-		MessageContent: enc.Data,
-		HotSauce:       enc.KeyName,
-		Iv:             enc.IV,
-		Timestamp:      time.Now().Unix(),
+		UserId:    c.User.Id,
+		Email:     c.User.Email,
+		RoomId:    roomName,
+		Timestamp: time.Now().Unix(),
+		Type:      pb.ChatMessage_TEXT,
+		Payload: &pb.ChatMessage_MessageContent{
+			MessageContent: enc.Data,
+		},
+		Iv:       enc.IV,
+		HotSauce: enc.KeyName,
 	}
-
 	return stream.Send(msg)
+}
+
+func (c *APIClient) SendFileControl(roomID, hash, name, action string) error {
+	msg := &pb.ChatMessage{
+		RoomId: roomID,
+		UserId: c.User.Id,
+		Email:  c.User.Email,
+		Type:   pb.ChatMessage_FILE_CONTROL,
+		Payload: &pb.ChatMessage_FileMeta{
+			FileMeta: &pb.FileMetadata{
+				FileHash: hash,
+				FileName: name,
+				Action:   action,
+			},
+		},
+	}
+	c.mu.RLock()
+	stream := c.Streams[roomID]
+	c.mu.RUnlock()
+	if stream == nil {
+		return fmt.Errorf("stream for room %s not found", roomID)
+	}
+	return stream.Send(msg)
+}
+
+func (c *APIClient) SendFileChunks(roomID string, data []byte) error {
+	const chunkSize = 1024 * 1024 // 1MB
+	totalSize := len(data)
+
+	c.mu.RLock()
+	stream := c.Streams[roomID]
+	c.mu.RUnlock()
+
+	for i := 0; i < totalSize; i += chunkSize {
+		end := i + chunkSize
+		if end > totalSize {
+			end = totalSize
+		}
+
+		msg := &pb.ChatMessage{
+			RoomId:    roomID,
+			UserId:    c.User.Id,
+			Email:     c.User.Email,
+			Type:      pb.ChatMessage_FILE_CHUNK,
+			Timestamp: time.Now().Unix(),
+			Payload: &pb.ChatMessage_DataChunk{
+				DataChunk: data[i:end],
+			},
+		}
+
+		if err := stream.Send(msg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *APIClient) StartOfferReaper(timeout time.Duration) {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		for range ticker.C {
+			now := time.Now()
+			c.ActiveOffers.Range(func(key, value interface{}) bool {
+				offer := value.(PendingFile)
+				if now.Sub(offer.Timestamp) > timeout {
+					c.ActiveOffers.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 }

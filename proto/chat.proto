@@ -8,10 +8,8 @@ service ChatService {
   rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
   // 1. Login Endpoint (replaces POST /login)
   rpc Login(LoginRequest) returns (LoginResponse);
-
   // 2. Room Management (replaces POST /room/:name)
   rpc JoinRoom(JoinRoomRequest) returns (RoomResponse);
-
   // 3. Chat Stream (replaces POST /message and WS /ws/...)
   // Clients send messages into this stream and receive broadcasts from it.
   rpc Stream(stream ChatMessage) returns (stream ChatMessage);
@@ -40,18 +38,35 @@ message ChatMessage {
   string room_id = 1;
   string user_id = 2;
   string email = 3;
-  
-  // Content matches internal.Message.Message (Base64 ciphertext)
-  // We use bytes for efficiency, but you can stick to string if you prefer 
-  // keeping the base64 representation directly.
-  string message_content = 4; 
+  int64 timestamp = 4;
 
-  int64 timestamp = 5;
-  string reply_to = 6;
+  enum MessageType {
+    TEXT = 0;
+    FILE_CONTROL = 1; // Metadata: Offers, Acceptances, etc.
+    FILE_CHUNK = 2;   // Raw transient binary data
+  }
+  MessageType type = 5;
+
+  // Collapse regular text and file metadata into one "Saved" category
+  // and keep raw data in a "Transient" category
+  oneof payload {
+    string message_content = 6; // Regular chat (Base64 ciphertext)
+    FileMetadata file_meta = 7; // Accountability Handshake
+    bytes data_chunk = 8;       // Transient binary data (Not saved to DB)
+  }
+
+  string reply_to = 9;
   
-  // Encryption Metadata
-  string iv = 7;        
-  string hot_sauce = 8; 
+  // Encryption Metadata for TEXT and FILE_CHUNK
+  string iv = 10;
+  string hot_sauce = 11;
+}
+
+message FileMetadata {
+  string file_hash = 1;   // SHA-256 for accountability
+  string file_name = 2;
+  int64 total_size = 3;
+  string action = 4;      // "OFFER", "ACCEPT", "REJECT", "COMPLETE"
 }
 
 message LoginRequest {
@@ -80,7 +95,7 @@ message RoomResponse {
   string name = 2;
   bool success = 3;
   // You might want to return recent messages upon joining
-  repeated ChatMessage history = 4; 
+  repeated ChatMessage history = 4;
 }
 
 message AdminRequest {
