@@ -39,9 +39,10 @@ func init() {
 	roomScrolls = make(map[string]*container.Scroll)
 }
 
-type vfdTheme struct{}
+// --- THEME DEFINITIONS ---
 
-var _ fyne.Theme = (*vfdTheme)(nil)
+// VFD Theme (Original Cyan)
+type vfdTheme struct{}
 
 func (v vfdTheme) Color(n fyne.ThemeColorName, v2 fyne.ThemeVariant) color.Color {
 	cyan := color.RGBA{0, 240, 255, 255}
@@ -54,25 +55,83 @@ func (v vfdTheme) Color(n fyne.ThemeColorName, v2 fyne.ThemeVariant) color.Color
 		return cyan
 	case theme.ColorNameBackground, theme.ColorNameOverlayBackground:
 		return darkBlue
-	case theme.ColorNameInputBackground:
+	case theme.ColorNameInputBackground, theme.ColorNameButton:
 		return inputBg
-	case theme.ColorNameButton:
-		return inputBg
-	case theme.ColorNameShadow:
+	case theme.ColorNameShadow, theme.ColorNamePrimary:
 		return cyan
-	case theme.ColorNamePrimary:
-		return cyan
-	case theme.ColorNameScrollBar:
-		return dimCyan
-	case theme.ColorNamePlaceHolder:
+	case theme.ColorNameScrollBar, theme.ColorNamePlaceHolder:
 		return dimCyan
 	}
 	return theme.DefaultTheme().Color(n, theme.VariantDark)
 }
-
 func (v vfdTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
 func (v vfdTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
 func (v vfdTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
+
+// Amber Theme (Monochrome Orange)
+type amberTheme struct{}
+
+func (a amberTheme) Color(n fyne.ThemeColorName, v2 fyne.ThemeVariant) color.Color {
+	amber := color.RGBA{255, 176, 0, 255}
+	dimAmber := color.RGBA{130, 80, 0, 255}
+	darkAmber := color.RGBA{15, 10, 0, 255}
+	inputBg := color.RGBA{30, 20, 0, 255}
+
+	switch n {
+	case theme.ColorNameForeground, theme.ColorNamePrimary, theme.ColorNameShadow:
+		return amber
+	case theme.ColorNameBackground, theme.ColorNameOverlayBackground:
+		return darkAmber
+	case theme.ColorNameInputBackground, theme.ColorNameButton:
+		return inputBg
+	case theme.ColorNameScrollBar, theme.ColorNamePlaceHolder:
+		return dimAmber
+	}
+	return theme.DefaultTheme().Color(n, theme.VariantDark)
+}
+func (a amberTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
+func (a amberTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
+func (a amberTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
+
+// PIPBOY Theme (Fallout Phosphor Green)
+type pipboyTheme struct{}
+
+func (p pipboyTheme) Color(n fyne.ThemeColorName, v2 fyne.ThemeVariant) color.Color {
+	pGreen := color.RGBA{26, 255, 128, 255}
+	dimGreen := color.RGBA{10, 100, 50, 255}
+	black := color.RGBA{2, 12, 2, 255}
+	inputBg := color.RGBA{5, 25, 10, 255}
+
+	switch n {
+	case theme.ColorNameForeground, theme.ColorNamePrimary, theme.ColorNameShadow:
+		return pGreen
+	case theme.ColorNameBackground, theme.ColorNameOverlayBackground:
+		return black
+	case theme.ColorNameInputBackground, theme.ColorNameButton:
+		return inputBg
+	case theme.ColorNameScrollBar, theme.ColorNamePlaceHolder:
+		return dimGreen
+	}
+	return theme.DefaultTheme().Color(n, theme.VariantDark)
+}
+func (p pipboyTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
+func (p pipboyTheme) Font(s fyne.TextStyle) fyne.Resource     { return theme.DefaultTheme().Font(s) }
+func (p pipboyTheme) Size(n fyne.ThemeSizeName) float32       { return theme.DefaultTheme().Size(n) }
+
+// --- UI HELPERS ---
+
+func ApplyTheme(name string) {
+	var t fyne.Theme
+	switch name {
+	case "Amber":
+		t = &amberTheme{}
+	case "PIPBOY":
+		t = &pipboyTheme{}
+	default:
+		t = &vfdTheme{}
+	}
+	fyne.CurrentApp().Settings().SetTheme(t)
+}
 
 func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	emailEntry := widget.NewEntry()
@@ -93,7 +152,7 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	})
 	loginBtn.Importance = widget.HighImportance
 
-	title := canvas.NewText("SCREAM-NG", color.RGBA{0, 255, 255, 255})
+	title := canvas.NewText("SCREAM-NG", theme.PrimaryColor())
 	title.TextSize = 24
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
@@ -180,8 +239,22 @@ func MakeMainScreen() fyne.CanvasObject {
 		d.Show()
 	})
 
+	// Theme Selector Integration
+	themeSelector := widget.NewSelect([]string{"VFD", "Amber", "PIPBOY"}, func(selected string) {
+		ApplyTheme(selected)
+	})
+	themeSelector.SetSelected("VFD")
+
 	sidebarContent := container.NewBorder(
-		container.NewVBox(widget.NewLabelWithStyle("QUICK JOIN", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), newRoomEntry, joinBtn, widget.NewSeparator()),
+		container.NewVBox(
+			widget.NewLabelWithStyle("QUICK JOIN", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			newRoomEntry,
+			joinBtn,
+			widget.NewSeparator(),
+			widget.NewLabelWithStyle("INTERFACE", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			themeSelector,
+			widget.NewSeparator(),
+		),
 		loadKeysBtn,
 		nil, nil,
 		container.NewVScroll(accordion),
@@ -242,7 +315,6 @@ func loadRoom(name string) {
 func ListenForMessages() {
 	for msg := range Client.MsgChan {
 		m := msg
-		// Logic runs in background; only UI updates use fyne.Do
 		switch m.Type {
 		case pb.ChatMessage_FILE_CONTROL:
 			handleFileControl(m)
@@ -265,7 +337,7 @@ func renderTextMessage(m *pb.ChatMessage) {
 			content = dec
 		}
 	}
-	header := canvas.NewText(fmt.Sprintf("[%s] <%s>", time.Unix(m.Timestamp, 0).Format("15:04:05"), m.Email), color.RGBA{0, 200, 255, 200})
+	header := canvas.NewText(fmt.Sprintf("[%s] <%s>", time.Unix(m.Timestamp, 0).Format("15:04:05"), m.Email), theme.PrimaryColor())
 	header.TextSize = 10
 	body := widget.NewLabel(content)
 	body.Wrapping = fyne.TextWrapWord
@@ -306,7 +378,6 @@ func handleFileChunk(m *pb.ChatMessage) {
 		return
 	}
 
-	// Don't process chunks we sent ourselves
 	if m.Email == Client.User.Email {
 		return
 	}
@@ -316,8 +387,6 @@ func handleFileChunk(m *pb.ChatMessage) {
 	buffer := append(val.([]byte), data...)
 	incomingChunks.Store(key, buffer)
 
-	// In this implementation, we prompt the user to save once the first data arrives
-	// For production, you would add a "COMPLETE" action to pb.FileMetadata
 	if len(buffer) == len(data) {
 		fyne.Do(func() {
 			dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
@@ -326,7 +395,7 @@ func handleFileChunk(m *pb.ChatMessage) {
 				}
 				defer writer.Close()
 				writer.Write(buffer)
-				incomingChunks.Delete(key) // Purge after save
+				incomingChunks.Delete(key)
 			}, window)
 		})
 	}
