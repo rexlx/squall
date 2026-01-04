@@ -239,7 +239,6 @@ func MakeMainScreen() fyne.CanvasObject {
 		d.Show()
 	})
 
-	// Theme Selector Integration
 	themeSelector := widget.NewSelect([]string{"VFD", "Amber", "PIPBOY"}, func(selected string) {
 		ApplyTheme(selected)
 	})
@@ -259,6 +258,13 @@ func MakeMainScreen() fyne.CanvasObject {
 		nil, nil,
 		container.NewVScroll(accordion),
 	)
+
+	if fyne.CurrentDevice().IsMobile() {
+		return container.NewAppTabs(
+			container.NewTabItemWithIcon("Lobby", theme.ListIcon(), sidebarContent),
+			container.NewTabItemWithIcon("Chats", theme.MailComposeIcon(), docTabs),
+		)
+	}
 
 	split := container.NewHSplit(sidebarContent, docTabs)
 	split.SetOffset(0.25)

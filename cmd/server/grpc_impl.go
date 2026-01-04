@@ -47,7 +47,7 @@ func (s *GrpcServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 
-	token, err := GenerateJWT(user.ID, s.appServer.Key)
+	token, err := GenerateJWT(user.ID, user.Role, user.Email, s.appServer.Key)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to generate token")
 	}

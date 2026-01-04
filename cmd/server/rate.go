@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
@@ -12,68 +13,71 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// RateLimiter manages rate limits per IP address
-type RateLimiter struct {
-	mu       sync.Mutex
-	visitors map[string]*rate.Limiter
-	r        rate.Limit // Request limit (e.g., 5 requests/sec)
-	b        int        // Burst limit (e.g., allow 10 at once)
+// visitor wraps the rate limiter with a timestamp for TTL pruning
+type visitor struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
 }
 
+// RateLimiter manages rate limits per IP address with automated cleanup
+type RateLimiter struct {
+	mu       sync.Mutex
+	visitors map[string]*visitor
+	r        rate.Limit // Request limit (requests/sec)
+	b        int        // Burst limit
+}
+
+// NewRateLimiter initializes the limiter and starts the background cleanup goroutine
 func NewRateLimiter(rps int, burst int) *RateLimiter {
-	return &RateLimiter{
-		visitors: make(map[string]*rate.Limiter),
+	rl := &RateLimiter{
+		visitors: make(map[string]*visitor),
 		r:        rate.Limit(rps),
 		b:        burst,
 	}
+
+	// Start background cleanup to prevent memory exhaustion
+	go rl.cleanupVisitors()
+
+	return rl
 }
 
-// getLimiter returns (or creates) the limiter for a specific IP
+// getLimiter returns (or creates) the limiter for a specific IP and updates its TTL
 func (rl *RateLimiter) getLimiter(ip string) *rate.Limiter {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	limiter, exists := rl.visitors[ip]
+	v, exists := rl.visitors[ip]
 	if !exists {
-		limiter = rate.NewLimiter(rl.r, rl.b)
-		rl.visitors[ip] = limiter
+		v = &visitor{
+			limiter: rate.NewLimiter(rl.r, rl.b),
+		}
+		rl.visitors[ip] = v
 	}
 
-	return limiter
+	// Update the last seen time every time the limiter is accessed
+	v.lastSeen = time.Now()
+
+	return v.limiter
 }
 
-// Interceptor is the gRPC middleware function
-func (rl *RateLimiter) Interceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	// 1. Extract IP from context
-	ip := "unknown"
-	if p, ok := peer.FromContext(ctx); ok {
-		// p.Addr.String() returns "IP:Port", we just want IP
-		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
-			ip = host
+// cleanupVisitors periodically removes IPs that haven't been seen in over 3 minutes
+func (rl *RateLimiter) cleanupVisitors() {
+	for {
+		time.Sleep(1 * time.Minute)
+
+		rl.mu.Lock()
+		for ip, v := range rl.visitors {
+			if time.Since(v.lastSeen) > 3*time.Minute {
+				delete(rl.visitors, ip)
+			}
 		}
+		rl.mu.Unlock()
 	}
-
-	// 2. Check Limit
-	limiter := rl.getLimiter(ip)
-	if !limiter.Allow() {
-		return nil, status.Errorf(codes.ResourceExhausted, "too many requests - slow down")
-	}
-
-	// 3. Cleanup (Optional: Simple map cleanup to prevent memory leaks)
-	// In a real prod app, use an LRU cache or run a background cleanup goroutine.
-
-	return handler(ctx, req)
 }
 
 // UnaryInterceptor protects unary calls (Login, CreateUser, etc.)
 func (rl *RateLimiter) UnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	ip := "unknown"
-	if p, ok := peer.FromContext(ctx); ok {
-		// p.Addr.String() typically returns "IP:Port"
-		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
-			ip = host
-		}
-	}
+	ip := rl.extractIP(ctx)
 
 	if !rl.getLimiter(ip).Allow() {
 		return nil, status.Errorf(codes.ResourceExhausted, "too many requests - slow down")
@@ -84,16 +88,22 @@ func (rl *RateLimiter) UnaryInterceptor(ctx context.Context, req interface{}, in
 
 // StreamInterceptor for stream limits (like Connect/Stream)
 func (rl *RateLimiter) StreamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	ip := "unknown"
-	if p, ok := peer.FromContext(ss.Context()); ok {
-		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
-			ip = host
-		}
-	}
+	ip := rl.extractIP(ss.Context())
 
 	if !rl.getLimiter(ip).Allow() {
 		return status.Errorf(codes.ResourceExhausted, "too many requests - slow down")
 	}
 
 	return handler(srv, ss)
+}
+
+// extractIP helper to get the remote IP from gRPC context
+func (rl *RateLimiter) extractIP(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok {
+		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
+			return host
+		}
+		return p.Addr.String()
+	}
+	return "unknown"
 }

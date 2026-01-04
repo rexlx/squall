@@ -47,17 +47,13 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	// 1. Adjust for Prune Testing if requested
 	if *ensurePrune {
 		log.Println("!!! PRUNE HEAVY MODE ENABLED !!!")
-		// To hit a 1000 msg limit in 10s (typical prune interval), we need >100 msgs/sec per room.
-		// 50 users sending every 100ms = 500 msgs/sec/room.
 		*numUsers = 50
-		*msgRate = 100 // 10 msg/sec per user
+		*msgRate = 100
 		log.Printf("Adjusted configuration: %d Users @ %dms interval", *numUsers, *msgRate)
 	}
 
-	// 2. Load Certificates
 	cert, err := tls.LoadX509KeyPair("data/client-cert.pem", "data/client-key.pem")
 	if err != nil {
 		log.Fatalf("Cert load failed: %v", err)
@@ -67,18 +63,14 @@ func main() {
 		InsecureSkipVerify: true,
 	})
 
-	// 3. Setup Test Environment (Admin Login -> Create Users)
 	token := setupEnv(creds)
 
-	// 4. Launch Stats Reporter
 	go runReporter()
 
-	// 5. Spawn Bots
 	log.Printf("Launching %d bots...", *numUsers)
 	var wg sync.WaitGroup
 	wg.Add(*numUsers)
 
-	// Stagger login to avoid connection storms
 	for i := 0; i < *numUsers; i++ {
 		go func(id int) {
 			defer wg.Done()
@@ -95,11 +87,11 @@ func runReporter() {
 		sent := atomic.SwapUint64(&globalStats.Sent, 0)
 		recv := atomic.SwapUint64(&globalStats.Recv, 0)
 		totLat := atomic.SwapInt64(&globalStats.TotalLat, 0)
-		maxLat := atomic.SwapInt64(&globalStats.MaxLat, 0) // Resets max every second
+		maxLat := atomic.SwapInt64(&globalStats.MaxLat, 0)
 
 		var avgLat float64
 		if sent > 0 {
-			avgLat = float64(totLat) / float64(sent) / 1000.0 // Convert micro to milli
+			avgLat = float64(totLat) / float64(sent) / 1000.0
 		}
 		maxLatMs := float64(maxLat) / 1000.0
 
@@ -109,11 +101,13 @@ func runReporter() {
 }
 
 func setupEnv(creds credentials.TransportCredentials) string {
-	conn, _ := grpc.Dial(*host, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.Dial(*host, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		log.Fatalf("Failed to dial: %v", err)
+	}
 	defer conn.Close()
 	client := pb.NewChatServiceClient(conn)
 
-	// Login Admin
 	resp, err := client.Login(context.Background(), &pb.LoginRequest{
 		Email: *adminEmail, Password: *adminPass,
 	})
@@ -121,14 +115,17 @@ func setupEnv(creds credentials.TransportCredentials) string {
 		log.Fatalf("Admin login failed: %v", err)
 	}
 
-	// Pre-create users
 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", resp.Token))
 	for i := 0; i < *numUsers; i++ {
-		client.CreateUser(ctx, &pb.CreateUserRequest{
-			Email: fmt.Sprintf("bench_%d@test.com", i), Password: "password", Role: "user",
+		// Ignore errors here in case users already exist
+		_, _ = client.CreateUser(ctx, &pb.CreateUserRequest{
+			Email:     fmt.Sprintf("bench_%d@test.com", i),
+			Password:  "password",
+			FirstName: fmt.Sprintf("Bot-%d", i),
+			Role:      "user",
 		})
 	}
-	return resp.Token // Use admin token for simplicity or re-login as user if strict
+	return resp.Token
 }
 
 func runBot(id int, creds credentials.TransportCredentials, adminToken string) {
@@ -139,17 +136,15 @@ func runBot(id int, creds credentials.TransportCredentials, adminToken string) {
 	defer conn.Close()
 	client := pb.NewChatServiceClient(conn)
 
-	// Login (Simple: Assume user exists and password is 'password')
 	email := fmt.Sprintf("bench_%d@test.com", id)
 	lResp, err := client.Login(context.Background(), &pb.LoginRequest{Email: email, Password: "password"})
-	if err != nil {
+	if err != nil || lResp.User == nil {
 		log.Printf("Bot %d login failed", id)
 		return
 	}
 
 	authCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", lResp.Token))
 
-	// Join Rooms & Start Streams
 	for r := 0; r < *numRooms; r++ {
 		roomName := fmt.Sprintf("stress_room_%d", r)
 		client.JoinRoom(authCtx, &pb.JoinRoomRequest{Email: email, RoomName: roomName})
@@ -164,10 +159,9 @@ func startStream(client pb.ChatServiceClient, ctx context.Context, userID, roomI
 		return
 	}
 
-	// Handshake
+	// Handshake: Send empty message with RoomID/UserID to register stream
 	stream.Send(&pb.ChatMessage{UserId: userID, RoomId: roomID})
 
-	// Receiver
 	go func() {
 		for {
 			if _, err := stream.Recv(); err != nil {
@@ -177,14 +171,19 @@ func startStream(client pb.ChatServiceClient, ctx context.Context, userID, roomI
 		}
 	}()
 
-	// Sender
 	ticker := time.NewTicker(time.Duration(*msgRate) * time.Millisecond)
-	// Random jitter start
 	time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
 
 	for range ticker.C {
+		// FIXED: Use Payload wrapper for oneof and set Type explicitly
 		msg := &pb.ChatMessage{
-			UserId: userID, RoomId: roomID, MessageContent: "cGluZw==", Timestamp: time.Now().Unix(),
+			UserId: userID,
+			RoomId: roomID,
+			Type:   pb.ChatMessage_TEXT,
+			Payload: &pb.ChatMessage_MessageContent{
+				MessageContent: "cGluZw==", // "ping"
+			},
+			Timestamp: time.Now().Unix(),
 		}
 
 		start := time.Now()
@@ -195,7 +194,6 @@ func startStream(client pb.ChatServiceClient, ctx context.Context, userID, roomI
 			atomic.AddUint64(&globalStats.Sent, 1)
 			atomic.AddInt64(&globalStats.TotalLat, dur)
 
-			// Update Max Latency (Simple non-blocking swap loop for accuracy)
 			for {
 				currMax := atomic.LoadInt64(&globalStats.MaxLat)
 				if dur <= currMax {
@@ -207,7 +205,7 @@ func startStream(client pb.ChatServiceClient, ctx context.Context, userID, roomI
 			}
 		} else {
 			atomic.AddUint64(&globalStats.Errors, 1)
-			return // Exit on broken stream
+			return
 		}
 	}
 }

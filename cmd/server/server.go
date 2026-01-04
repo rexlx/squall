@@ -90,3 +90,20 @@ func (s *Server) StartPruneWorker(interval time.Duration, keep int) {
 		}
 	}
 }
+
+func (s *Server) StartRoomReaper(checkInterval time.Duration, staleThreshold time.Duration) {
+	s.Logger.Printf("Room Reaper started (Check every %s, stale threshold %s)", checkInterval, staleThreshold)
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		start := time.Now()
+		s.Logger.Println("Room Reaper: Checking for stale rooms...")
+
+		if err := s.DB.ReapStaleRooms(staleThreshold); err != nil {
+			s.Logger.Printf("Room Reaper failed: %v", err)
+		} else {
+			s.Logger.Printf("Room Reaper finished in %v", time.Since(start))
+		}
+	}
+}

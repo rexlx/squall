@@ -7,11 +7,10 @@ import (
 	"log"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	_ "github.com/lib/pq"
 	"github.com/rexlx/squall/internal"
 )
 
-// Database interface (unchanged)
 type Database interface {
 	GetMessage(roomid, messageid string) (internal.Message, error)
 	StoreMessage(roomid string, message internal.Message) error
@@ -21,14 +20,13 @@ type Database interface {
 	StoreRoom(room Room) error
 	GetUserByEmail(email string) (User, error)
 	PruneMessages(keep int) error
+	ReapStaleRooms(threshold time.Duration) error
 }
 
 type PostgresDB struct {
 	Conn *sql.DB
 }
 
-// NewPostgresDB creates a connection.
-// connStr example: "postgres://user:password@localhost/dbname?sslmode=disable"
 func NewPostgresDB(connStr string) (*PostgresDB, error) {
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
@@ -47,19 +45,20 @@ func (db *PostgresDB) CreateTables() error {
 			email TEXT UNIQUE NOT NULL,
 			password TEXT,
 			name TEXT,
-			role TEXT,  -- NEW COLUMN
+			role TEXT,
 			created TIMESTAMP,
 			updated TIMESTAMP,
 			rooms JSONB,
 			history JSONB,
 			stats JSONB,
 			posts JSONB
-);`,
+		);`,
 		`CREATE TABLE IF NOT EXISTS rooms (
 			id TEXT PRIMARY KEY,
 			name TEXT,
 			max_messages INT,
-			stats JSONB
+			stats JSONB,
+			created_at TIMESTAMP DEFAULT NOW()
 		);`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id SERIAL PRIMARY KEY,
@@ -73,8 +72,8 @@ func (db *PostgresDB) CreateTables() error {
 			hot_sauce TEXT,
 			created_at TIMESTAMP DEFAULT NOW()
 		);`,
-		// NEW: Index for performance
 		`CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);`,
 	}
 
 	for _, q := range queries {
@@ -85,9 +84,6 @@ func (db *PostgresDB) CreateTables() error {
 	return nil
 }
 
-// GetMessage retrieves a specific message.
-// Note: Since internal.Message doesn't have an ID field, we query by the DB ID passed as messageid
-// but we cannot return that ID in the struct.
 func (db *PostgresDB) GetMessage(roomid, messageid string) (internal.Message, error) {
 	query := `SELECT room_id, user_id, email, msg_content, time_str, reply_to, iv, hot_sauce 
 	          FROM messages WHERE room_id = $1 AND id = $2`
@@ -102,11 +98,7 @@ func (db *PostgresDB) GetMessage(roomid, messageid string) (internal.Message, er
 	return m, nil
 }
 
-// StoreMessage performs a fast INSERT only.
-// Corrected to use specific fields from your internal.Message struct.
 func (db *PostgresDB) StoreMessage(roomid string, m internal.Message) error {
-	// 1. Insert the new message
-	// Note: internal.Message.Time is a string, matching your DB schema (time_str)
 	query := `INSERT INTO messages (room_id, user_id, email, msg_content, time_str, reply_to, iv, hot_sauce)
 	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
@@ -114,10 +106,7 @@ func (db *PostgresDB) StoreMessage(roomid string, m internal.Message) error {
 	return err
 }
 
-// PruneMessages deletes old messages from all rooms in the background.
-// This replaces the inline DELETE subquery that was killing performance.
 func (db *PostgresDB) PruneMessages(keep int) error {
-	// 1. Get all unique room IDs
 	rows, err := db.Conn.Query(`SELECT DISTINCT room_id FROM messages`)
 	if err != nil {
 		return err
@@ -132,8 +121,6 @@ func (db *PostgresDB) PruneMessages(keep int) error {
 		}
 	}
 
-	// 2. Delete messages exceeding the limit for each room
-	// We use the same logic as before, but decoupled from the send loop.
 	query := `DELETE FROM messages 
 	          WHERE room_id = $1 AND id NOT IN (
 	              SELECT id FROM messages 
@@ -162,7 +149,6 @@ func (db *PostgresDB) GetUser(userid string) (User, error) {
 		return User{}, err
 	}
 
-	// Unmarshal JSON fields back into structs
 	_ = json.Unmarshal(roomsJSON, &u.Rooms)
 	_ = json.Unmarshal(historyJSON, &u.History)
 	_ = json.Unmarshal(statsJSON, &u.Stats)
@@ -172,7 +158,6 @@ func (db *PostgresDB) GetUser(userid string) (User, error) {
 }
 
 func (db *PostgresDB) StoreUser(u User) error {
-	// Marshal complex fields to JSON
 	roomsJSON, _ := json.Marshal(u.Rooms)
 	historyJSON, _ := json.Marshal(u.History)
 	statsJSON, _ := json.Marshal(u.Stats)
@@ -196,7 +181,6 @@ func (db *PostgresDB) StoreUser(u User) error {
 }
 
 func (db *PostgresDB) GetRoom(roomid string) (Room, error) {
-	// 1. Get Room Metadata
 	query := `SELECT id, name, max_messages, stats FROM rooms WHERE id = $1`
 	row := db.Conn.QueryRow(query, roomid)
 
@@ -209,14 +193,11 @@ func (db *PostgresDB) GetRoom(roomid string) (Room, error) {
 	}
 	_ = json.Unmarshal(statsJSON, &r.Stats)
 
-	// 2. Hydrate Messages (Fetch last N messages)
-	// Note: We populate the Messages slice so the Room struct is complete for the application
 	msgQuery := `SELECT room_id, user_id, email, msg_content, time_str, reply_to, iv, hot_sauce 
 	             FROM messages WHERE room_id = $1 ORDER BY id DESC LIMIT 50`
 
 	rows, err := db.Conn.Query(msgQuery, roomid)
 	if err != nil {
-		// We don't fail getting the room if messages fail, just log it or return empty
 		log.Printf("Warning: failed to fetch messages for room %s: %v", roomid, err)
 	} else {
 		defer rows.Close()
@@ -224,9 +205,6 @@ func (db *PostgresDB) GetRoom(roomid string) (Room, error) {
 		for rows.Next() {
 			var m internal.Message
 			if err := rows.Scan(&m.RoomID, &m.UserID, &m.Email, &m.Message, &m.Time, &m.ReplyTo, &m.InitialVector, &m.HotSauce); err == nil {
-				// Prepend to maintain chronological order if using DESC?
-				// Or simply append and let the client handle sort.
-				// Usually chat needs oldest->newest.
 				msgs = append([]internal.Message{m}, msgs...)
 			}
 		}
@@ -239,8 +217,6 @@ func (db *PostgresDB) GetRoom(roomid string) (Room, error) {
 func (db *PostgresDB) StoreRoom(r Room) error {
 	statsJSON, _ := json.Marshal(r.Stats)
 
-	// We do NOT store r.Messages here because they are stored individually via StoreMessage.
-	// We only store the room metadata.
 	query := `INSERT INTO rooms (id, name, max_messages, stats)
 	          VALUES ($1, $2, $3, $4)
 	          ON CONFLICT (id) DO UPDATE SET
@@ -253,7 +229,6 @@ func (db *PostgresDB) StoreRoom(r Room) error {
 }
 
 func (db *PostgresDB) GetUserByEmail(email string) (User, error) {
-	// Select the ID first, or the whole row
 	query := `SELECT id FROM users WHERE email = $1`
 	row := db.Conn.QueryRow(query, email)
 
@@ -262,6 +237,36 @@ func (db *PostgresDB) GetUserByEmail(email string) (User, error) {
 		return User{}, err
 	}
 
-	// Reuse existing GetUser
 	return db.GetUser(id)
+}
+
+func (db *PostgresDB) ReapStaleRooms(threshold time.Duration) error {
+	interval := fmt.Sprintf("%d hours", int(threshold.Hours()))
+
+	tx, err := db.Conn.Begin()
+	if err != nil {
+		return err
+	}
+
+	staleRoomsQuery := `
+		SELECT id FROM rooms 
+		WHERE created_at < NOW() - $1::interval
+		AND id NOT IN (
+			SELECT DISTINCT room_id FROM messages 
+			WHERE created_at > NOW() - $1::interval
+		)`
+
+	_, err = tx.Exec(fmt.Sprintf(`DELETE FROM messages WHERE room_id IN (%s)`, staleRoomsQuery), interval)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	_, err = tx.Exec(fmt.Sprintf(`DELETE FROM rooms WHERE id IN (%s)`, staleRoomsQuery), interval)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	return tx.Commit()
 }

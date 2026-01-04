@@ -12,13 +12,17 @@ var ErrInvalidToken = errors.New("token is invalid")
 
 type UserClaims struct {
 	UserID string `json:"user_id"`
+	Role   string `json:"role"`  // Add Role to claims
+	Email  string `json:"email"` // Add Email to claims
 	jwt.RegisteredClaims
 }
 
 // GenerateJWT creates a signed token for a specific user that expires in 24 hours
-func GenerateJWT(userID string, secretKey string) (string, error) {
+func GenerateJWT(userID string, role string, email string, secretKey string) (string, error) {
 	claims := UserClaims{
 		UserID: userID,
+		Role:   role,
+		Email:  email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

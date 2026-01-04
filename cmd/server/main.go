@@ -64,7 +64,8 @@ func main() {
 	appServer := NewServer("0.0.0.0:8080", jwtKey, logger, db)
 	// Start the SaveWorker (assuming you kept the simplified worker from previous discussions)
 	go appServer.StartSaveWorker()
-
+	go appServer.StartPruneWorker(1*time.Hour, 1000)
+	go appServer.StartRoomReaper(6*time.Hour, 49*time.Hour)
 	grpcImpl := NewGrpcServer(appServer)
 
 	// 7. Initialize Rate Limiter

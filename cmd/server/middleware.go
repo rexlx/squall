@@ -14,9 +14,10 @@ type contextKey string
 
 const userContextKey contextKey = "user"
 
-// AuthInterceptor is a middleware that checks for a valid JWT and injects the User into the context.
+// AuthInterceptor checks for a valid JWT and injects a lightweight User into the context.
+// It uses a stateless strategy, relying on claims within the token to avoid database bottlenecks.
 func (s *GrpcServer) AuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	// 1. Skip Auth for Login (and other public endpoints if any)
+	// 1. Skip Auth for Login
 	if info.FullMethod == "/chat.ChatService/Login" {
 		return handler(ctx, req)
 	}
@@ -32,9 +33,7 @@ func (s *GrpcServer) AuthInterceptor(ctx context.Context, req interface{}, info 
 		return nil, status.Error(codes.Unauthenticated, "authorization token is not provided")
 	}
 
-	// Support "Bearer <token>" or just "<token>"
-	token := values[0]
-	token = strings.TrimPrefix(token, "Bearer ")
+	token := strings.TrimPrefix(values[0], "Bearer ")
 
 	// 3. Validate Token
 	claims, err := ValidateJWT(token, s.appServer.Key)
@@ -42,11 +41,12 @@ func (s *GrpcServer) AuthInterceptor(ctx context.Context, req interface{}, info 
 		return nil, status.Error(codes.Unauthenticated, "access token is invalid: "+err.Error())
 	}
 
-	// 4. Fetch User from DB
-	// This ensures the user still exists and we have their latest Role
-	user, err := s.appServer.DB.GetUser(claims.UserID)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "user not found")
+	// 4. Populate lightweight User from Claims (Stateless Strategy)
+	// Prerequisite: UserClaims must be updated to include Role and Email.
+	user := User{
+		ID:    claims.UserID,
+		Role:  claims.Role,
+		Email: claims.Email,
 	}
 
 	// 5. Inject User into Context
@@ -55,7 +55,7 @@ func (s *GrpcServer) AuthInterceptor(ctx context.Context, req interface{}, info 
 	return handler(newCtx, req)
 }
 
-// Helper to retrieve user from context in your handlers
+// GetUserFromContext retrieves the user injected by the interceptors.
 func GetUserFromContext(ctx context.Context) (User, error) {
 	user, ok := ctx.Value(userContextKey).(User)
 	if !ok {
@@ -64,12 +64,11 @@ func GetUserFromContext(ctx context.Context) (User, error) {
 	return user, nil
 }
 
-// StreamAuthInterceptor handles authentication for streaming RPCs (like Chat)
+// StreamAuthInterceptor handles authentication for streaming RPCs (like Chat).
 func (s *GrpcServer) StreamAuthInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	// 1. Get Context from the stream
 	ctx := ss.Context()
 
-	// 2. Extract Token from Metadata
+	// 1. Extract Token from Metadata
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return status.Error(codes.Unauthenticated, "metadata is not provided")
@@ -82,20 +81,20 @@ func (s *GrpcServer) StreamAuthInterceptor(srv interface{}, ss grpc.ServerStream
 
 	token := strings.TrimPrefix(values[0], "Bearer ")
 
-	// 3. Validate Token
+	// 2. Validate Token
 	claims, err := ValidateJWT(token, s.appServer.Key)
 	if err != nil {
 		return status.Error(codes.Unauthenticated, "access token is invalid")
 	}
 
-	// 4. Fetch User from DB
-	user, err := s.appServer.DB.GetUser(claims.UserID)
-	if err != nil {
-		return status.Error(codes.Unauthenticated, "user not found")
+	// 3. Populate lightweight User from Claims (Stateless Strategy)
+	user := User{
+		ID:    claims.UserID,
+		Role:  claims.Role,
+		Email: claims.Email,
 	}
 
-	// 5. Inject User into Context
-	// We must wrap the ServerStream to modify the Context it returns
+	// 4. Inject User into Context via WrappedServerStream
 	newCtx := context.WithValue(ctx, userContextKey, user)
 	wrappedStream := &WrappedServerStream{
 		ServerStream: ss,
@@ -105,7 +104,7 @@ func (s *GrpcServer) StreamAuthInterceptor(srv interface{}, ss grpc.ServerStream
 	return handler(srv, wrappedStream)
 }
 
-// Wrapper to override Context()
+// WrappedServerStream allows overriding the Context of a gRPC stream.
 type WrappedServerStream struct {
 	grpc.ServerStream
 	ctx context.Context
