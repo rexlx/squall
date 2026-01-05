@@ -98,6 +98,43 @@ func (s *GrpcServer) CreateUser(ctx context.Context, req *pb.CreateUserRequest) 
 	return &pb.CreateUserResponse{Success: true, UserId: newID}, nil
 }
 
+// cmd/server/grpc_impl.go updates
+
+func (s *GrpcServer) UpdatePassword(ctx context.Context, req *pb.UpdatePasswordRequest) (*pb.UpdatePasswordResponse, error) {
+	caller, err := GetUserFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Security: Users can only update their own password unless they are an admin
+	if caller.Email != req.Email && caller.Role != "admin" {
+		return nil, status.Error(codes.PermissionDenied, "unauthorized password update")
+	}
+
+	user, err := s.appServer.DB.GetUserByEmail(req.Email)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+
+	// Verify old password (skip check if admin is performing the update)
+	if caller.Role != "admin" {
+		ok, _ := user.PasswordMatches(req.OldPassword)
+		if !ok {
+			return nil, status.Error(codes.Unauthenticated, "incorrect old password")
+		}
+	}
+
+	if err := user.SetPassword(req.NewPassword); err != nil {
+		return nil, status.Error(codes.Internal, "failed to hash password")
+	}
+
+	if err := s.appServer.DB.StoreUser(user); err != nil {
+		return nil, status.Error(codes.Internal, "failed to update user")
+	}
+
+	return &pb.UpdatePasswordResponse{Success: true, Message: "Password updated successfully"}, nil
+}
+
 func (s *GrpcServer) JoinRoom(ctx context.Context, req *pb.JoinRoomRequest) (*pb.RoomResponse, error) {
 	roomName := req.RoomName
 	room, err := s.appServer.DB.GetRoom(roomName)
@@ -105,6 +142,40 @@ func (s *GrpcServer) JoinRoom(ctx context.Context, req *pb.JoinRoomRequest) (*pb
 	if err != nil {
 		room = Room{ID: roomName, Name: roomName, MaxMessages: 1000}
 		s.appServer.DB.StoreRoom(room)
+	}
+
+	// --- FIX: Persist History and Saved Rooms ---
+	caller, err := GetUserFromContext(ctx)
+	if err == nil {
+		fmt.Println("no user in context:", err)
+		dbUser, _ := s.appServer.DB.GetUserByEmail(caller.Email)
+
+		// 1. Update Saved Rooms (Unique list)
+		found := false
+		for _, r := range dbUser.Rooms {
+			if r == roomName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			dbUser.Rooms = append(dbUser.Rooms, roomName)
+		}
+
+		// 2. Update History (Move current room to the front, limit to 10)
+		newHistory := []string{roomName}
+		for _, r := range dbUser.History {
+			if r != roomName {
+				newHistory = append(newHistory, r)
+			}
+		}
+		if len(newHistory) > 10 {
+			newHistory = newHistory[:10]
+		}
+		dbUser.History = newHistory
+
+		// Persist changes to database
+		s.appServer.DB.StoreUser(dbUser)
 	}
 
 	var history []*pb.ChatMessage

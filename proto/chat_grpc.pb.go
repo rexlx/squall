@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	ChatService_CreateUser_FullMethodName = "/chat.ChatService/CreateUser"
-	ChatService_Login_FullMethodName      = "/chat.ChatService/Login"
-	ChatService_JoinRoom_FullMethodName   = "/chat.ChatService/JoinRoom"
-	ChatService_Stream_FullMethodName     = "/chat.ChatService/Stream"
-	ChatService_CreateRoom_FullMethodName = "/chat.ChatService/CreateRoom"
-	ChatService_BanUser_FullMethodName    = "/chat.ChatService/BanUser"
+	ChatService_CreateUser_FullMethodName     = "/chat.ChatService/CreateUser"
+	ChatService_Login_FullMethodName          = "/chat.ChatService/Login"
+	ChatService_JoinRoom_FullMethodName       = "/chat.ChatService/JoinRoom"
+	ChatService_Stream_FullMethodName         = "/chat.ChatService/Stream"
+	ChatService_CreateRoom_FullMethodName     = "/chat.ChatService/CreateRoom"
+	ChatService_BanUser_FullMethodName        = "/chat.ChatService/BanUser"
+	ChatService_UpdatePassword_FullMethodName = "/chat.ChatService/UpdatePassword"
 )
 
 // ChatServiceClient is the client API for ChatService service.
@@ -42,6 +43,7 @@ type ChatServiceClient interface {
 	// Admin tasks (kept from original)
 	CreateRoom(ctx context.Context, in *RoomRequest, opts ...grpc.CallOption) (*RoomResponse, error)
 	BanUser(ctx context.Context, in *AdminRequest, opts ...grpc.CallOption) (*AdminResponse, error)
+	UpdatePassword(ctx context.Context, in *UpdatePasswordRequest, opts ...grpc.CallOption) (*UpdatePasswordResponse, error)
 }
 
 type chatServiceClient struct {
@@ -128,6 +130,15 @@ func (c *chatServiceClient) BanUser(ctx context.Context, in *AdminRequest, opts 
 	return out, nil
 }
 
+func (c *chatServiceClient) UpdatePassword(ctx context.Context, in *UpdatePasswordRequest, opts ...grpc.CallOption) (*UpdatePasswordResponse, error) {
+	out := new(UpdatePasswordResponse)
+	err := c.cc.Invoke(ctx, ChatService_UpdatePassword_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ChatServiceServer is the server API for ChatService service.
 // All implementations must embed UnimplementedChatServiceServer
 // for forward compatibility
@@ -143,6 +154,7 @@ type ChatServiceServer interface {
 	// Admin tasks (kept from original)
 	CreateRoom(context.Context, *RoomRequest) (*RoomResponse, error)
 	BanUser(context.Context, *AdminRequest) (*AdminResponse, error)
+	UpdatePassword(context.Context, *UpdatePasswordRequest) (*UpdatePasswordResponse, error)
 	mustEmbedUnimplementedChatServiceServer()
 }
 
@@ -167,6 +179,9 @@ func (UnimplementedChatServiceServer) CreateRoom(context.Context, *RoomRequest) 
 }
 func (UnimplementedChatServiceServer) BanUser(context.Context, *AdminRequest) (*AdminResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BanUser not implemented")
+}
+func (UnimplementedChatServiceServer) UpdatePassword(context.Context, *UpdatePasswordRequest) (*UpdatePasswordResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdatePassword not implemented")
 }
 func (UnimplementedChatServiceServer) mustEmbedUnimplementedChatServiceServer() {}
 
@@ -297,6 +312,24 @@ func _ChatService_BanUser_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ChatService_UpdatePassword_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePasswordRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).UpdatePassword(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_UpdatePassword_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).UpdatePassword(ctx, req.(*UpdatePasswordRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ChatService_ServiceDesc is the grpc.ServiceDesc for ChatService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -323,6 +356,10 @@ var ChatService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BanUser",
 			Handler:    _ChatService_BanUser_Handler,
+		},
+		{
+			MethodName: "UpdatePassword",
+			Handler:    _ChatService_UpdatePassword_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

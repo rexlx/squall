@@ -17,9 +17,22 @@ service ChatService {
   // Admin tasks (kept from original)
   rpc CreateRoom(RoomRequest) returns (RoomResponse);
   rpc BanUser(AdminRequest) returns (AdminResponse);
+  rpc UpdatePassword(UpdatePasswordRequest) returns (UpdatePasswordResponse);
 }
 
 // --- Message Definitions ---
+
+
+message UpdatePasswordRequest {
+  string email = 1;
+  string old_password = 2;
+  string new_password = 3;
+}
+
+message UpdatePasswordResponse {
+  bool success = 1;
+  string message = 2;
+}
 
 message CreateUserRequest {
   string email = 1;
