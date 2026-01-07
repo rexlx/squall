@@ -9,10 +9,16 @@ import (
 	"sync"
 	"time"
 
+	"fyne.io/fyne/v2"
 	pb "github.com/rexlx/squall/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+)
+
+const (
+	MaxHistorySize    = 20
+	MaxSavedRoomsSize = 20
 )
 
 type PendingFile struct {
@@ -37,6 +43,16 @@ type APIClient struct {
 
 	// Security: Tracks files we have offered for P2P transfer
 	ActiveOffers sync.Map // Map[string]PendingFile (Key: FileHash)
+
+	// Local history tracking and UI refresh callbacks
+	HistoryMu       sync.RWMutex
+	LocalHistory    []string // Rooms visited in this session
+	OnHistoryUpdate func()   // Callback when history changes
+	OnRoomsUpdate   func()   // Callback when saved rooms change
+
+	// Saved rooms tracking (separate from User.Rooms which may contain visited rooms from server)
+	SavedRoomsMu sync.RWMutex
+	SavedRooms   []string
 }
 
 var Client = &APIClient{
@@ -67,7 +83,7 @@ func InitClient() error {
 	}
 
 	creds := credentials.NewTLS(tlsConfig)
-	conn, err := grpc.Dial("neo.nullferatu.com:8085", grpc.WithTransportCredentials(creds))
+	conn, err := grpc.Dial("localhost:8080", grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
 	}
@@ -95,6 +111,12 @@ func (c *APIClient) Login(email, password string) error {
 
 	c.User = resp.User
 	c.Token = resp.Token
+
+	// Initialize SavedRooms from User.Rooms
+	c.SavedRoomsMu.Lock()
+	c.SavedRooms = append([]string{}, c.User.Rooms...)
+	c.SavedRoomsMu.Unlock()
+
 	return nil
 }
 
@@ -122,21 +144,125 @@ func (c *APIClient) JoinRoom(roomName string) error {
 		}
 	}
 
-	c.AddRoomToCache(roomName)
+	// Update local history when joining a room
+	c.AddToLocalHistory(roomName)
 	return c.StartStream(roomName)
 }
 
 func (c *APIClient) AddRoomToCache(roomName string) {
+	c.SavedRoomsMu.Lock()
+	defer c.SavedRoomsMu.Unlock()
+
+	// Check if already in saved rooms
 	exists := false
-	for _, r := range c.User.Rooms {
+	for _, r := range c.SavedRooms {
 		if r == roomName {
 			exists = true
 			break
 		}
 	}
+
 	if !exists {
-		c.User.Rooms = append(c.User.Rooms, roomName)
+		c.SavedRooms = append(c.SavedRooms, roomName)
+
+		// Limit saved rooms to MaxSavedRoomsSize
+		if len(c.SavedRooms) > MaxSavedRoomsSize {
+			c.SavedRooms = c.SavedRooms[len(c.SavedRooms)-MaxSavedRoomsSize:]
+		}
+
+		// Persist to server
+		go c.persistSavedRooms()
+
+		// Notify UI of rooms update
+		if c.OnRoomsUpdate != nil {
+			fyne.Do(c.OnRoomsUpdate)
+		}
 	}
+}
+
+func (c *APIClient) RemoveRoomFromCache(roomName string) {
+	c.SavedRoomsMu.Lock()
+	defer c.SavedRoomsMu.Unlock()
+
+	for i, r := range c.SavedRooms {
+		if r == roomName {
+			c.SavedRooms = append(c.SavedRooms[:i], c.SavedRooms[i+1:]...)
+
+			// Persist to server
+			go c.persistSavedRooms()
+
+			// Notify UI of rooms update
+			if c.OnRoomsUpdate != nil {
+				fyne.Do(c.OnRoomsUpdate)
+			}
+			break
+		}
+	}
+}
+
+func (c *APIClient) GetSavedRooms() []string {
+	c.SavedRoomsMu.RLock()
+	defer c.SavedRoomsMu.RUnlock()
+
+	// Return a copy
+	rooms := make([]string, len(c.SavedRooms))
+	copy(rooms, c.SavedRooms)
+	return rooms
+}
+
+func (c *APIClient) persistSavedRooms() {
+	c.SavedRoomsMu.RLock()
+	roomsCopy := make([]string, len(c.SavedRooms))
+	copy(roomsCopy, c.SavedRooms)
+	c.SavedRoomsMu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	ctx = c.getAuthContext(ctx)
+
+	// Call the server to update saved rooms
+	_, err := c.GrpcClient.UpdateUser(ctx, &pb.UpdateUserRequest{
+		User: &pb.User{
+			Email: c.User.Email,
+			Rooms: roomsCopy,
+		},
+	})
+	if err != nil {
+		fmt.Printf("Error persisting saved rooms: %v\n", err)
+	}
+}
+
+func (c *APIClient) AddToLocalHistory(roomName string) {
+	c.HistoryMu.Lock()
+	defer c.HistoryMu.Unlock()
+
+	// Check if room is already in history
+	for _, r := range c.LocalHistory {
+		if r == roomName {
+			return // Already in history
+		}
+	}
+	c.LocalHistory = append(c.LocalHistory, roomName)
+
+	// Limit history to MaxHistorySize
+	if len(c.LocalHistory) > MaxHistorySize {
+		c.LocalHistory = c.LocalHistory[len(c.LocalHistory)-MaxHistorySize:]
+	}
+
+	// Notify UI of history update on the main thread
+	if c.OnHistoryUpdate != nil {
+		fyne.Do(c.OnHistoryUpdate)
+	}
+}
+
+func (c *APIClient) GetLocalHistory() []string {
+	c.HistoryMu.RLock()
+	defer c.HistoryMu.RUnlock()
+
+	// Return a copy
+	history := make([]string, len(c.LocalHistory))
+	copy(history, c.LocalHistory)
+	return history
 }
 
 func (c *APIClient) LeaveRoom(roomName string) {
@@ -232,6 +358,31 @@ func (c *APIClient) SendMessage(roomName, text string) error {
 	}
 
 	return stream.Send(msg)
+}
+
+func (c *APIClient) UpdatePassword(email, oldPass, newPass string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	// If the client is already logged in, attach the authorization token
+	if c.Token != "" {
+		ctx = c.getAuthContext(ctx)
+	}
+
+	resp, err := c.GrpcClient.UpdatePassword(ctx, &pb.UpdatePasswordRequest{
+		Email:       email,
+		OldPassword: oldPass,
+		NewPassword: newPass,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("password update failed: %s", resp.Message)
+	}
+
+	return nil
 }
 
 func (c *APIClient) SendFileControl(roomID, hash, name, action string) error {

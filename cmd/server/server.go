@@ -9,6 +9,11 @@ import (
 	"github.com/rexlx/squall/internal"
 )
 
+var (
+	Whitelist   = make(map[string]bool)
+	WhitelistMu sync.RWMutex
+)
+
 type Server struct {
 	Queue     chan SaveRequest  `json:"-"`
 	Rooms     map[string]*Room  `json:"rooms"`

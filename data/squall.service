@@ -1,0 +1,32 @@
+[Unit]
+Description=Squall gRPC Chat Server
+After=network.target postgresql.service
+# Remove postgresql.service from 'After' if the DB is on a different host
+
+[Service]
+# Service Configuration
+Type=simple
+User=squall
+Group=squall
+ExecStart=/opt/squall/bin/server
+WorkingDirectory=/opt/squall
+# WorkingDirectory is important so the server can find 'data/server-cert.pem'
+# relative to the execution root.
+
+# Restart Policy
+Restart=on-failure
+RestartSec=5s
+
+# Environment Variables
+# Replace the placeholder values with your actual secrets
+Environment="JWT_SECRET=your_secure_jwt_secret_here"
+Environment="DB_DSN=user=squall password=secret host=localhost dbname=chaps sslmode=disable"
+# You can also use an EnvironmentFile to keep secrets out of this unit file:
+# EnvironmentFile=/opt/squall/config/squall.env
+
+# output handling (optional, systemd handles stdout to journald by default)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

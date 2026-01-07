@@ -26,6 +26,7 @@ const (
 	ChatService_CreateRoom_FullMethodName     = "/chat.ChatService/CreateRoom"
 	ChatService_BanUser_FullMethodName        = "/chat.ChatService/BanUser"
 	ChatService_UpdatePassword_FullMethodName = "/chat.ChatService/UpdatePassword"
+	ChatService_UpdateUser_FullMethodName     = "/chat.ChatService/UpdateUser"
 )
 
 // ChatServiceClient is the client API for ChatService service.
@@ -44,6 +45,7 @@ type ChatServiceClient interface {
 	CreateRoom(ctx context.Context, in *RoomRequest, opts ...grpc.CallOption) (*RoomResponse, error)
 	BanUser(ctx context.Context, in *AdminRequest, opts ...grpc.CallOption) (*AdminResponse, error)
 	UpdatePassword(ctx context.Context, in *UpdatePasswordRequest, opts ...grpc.CallOption) (*UpdatePasswordResponse, error)
+	UpdateUser(ctx context.Context, in *UpdateUserRequest, opts ...grpc.CallOption) (*UpdateUserResponse, error)
 }
 
 type chatServiceClient struct {
@@ -139,6 +141,15 @@ func (c *chatServiceClient) UpdatePassword(ctx context.Context, in *UpdatePasswo
 	return out, nil
 }
 
+func (c *chatServiceClient) UpdateUser(ctx context.Context, in *UpdateUserRequest, opts ...grpc.CallOption) (*UpdateUserResponse, error) {
+	out := new(UpdateUserResponse)
+	err := c.cc.Invoke(ctx, ChatService_UpdateUser_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ChatServiceServer is the server API for ChatService service.
 // All implementations must embed UnimplementedChatServiceServer
 // for forward compatibility
@@ -155,6 +166,7 @@ type ChatServiceServer interface {
 	CreateRoom(context.Context, *RoomRequest) (*RoomResponse, error)
 	BanUser(context.Context, *AdminRequest) (*AdminResponse, error)
 	UpdatePassword(context.Context, *UpdatePasswordRequest) (*UpdatePasswordResponse, error)
+	UpdateUser(context.Context, *UpdateUserRequest) (*UpdateUserResponse, error)
 	mustEmbedUnimplementedChatServiceServer()
 }
 
@@ -182,6 +194,9 @@ func (UnimplementedChatServiceServer) BanUser(context.Context, *AdminRequest) (*
 }
 func (UnimplementedChatServiceServer) UpdatePassword(context.Context, *UpdatePasswordRequest) (*UpdatePasswordResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdatePassword not implemented")
+}
+func (UnimplementedChatServiceServer) UpdateUser(context.Context, *UpdateUserRequest) (*UpdateUserResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateUser not implemented")
 }
 func (UnimplementedChatServiceServer) mustEmbedUnimplementedChatServiceServer() {}
 
@@ -330,6 +345,24 @@ func _ChatService_UpdatePassword_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ChatService_UpdateUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).UpdateUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_UpdateUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).UpdateUser(ctx, req.(*UpdateUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ChatService_ServiceDesc is the grpc.ServiceDesc for ChatService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -360,6 +393,10 @@ var ChatService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdatePassword",
 			Handler:    _ChatService_UpdatePassword_Handler,
+		},
+		{
+			MethodName: "UpdateUser",
+			Handler:    _ChatService_UpdateUser_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -16,6 +16,8 @@ const userContextKey contextKey = "user"
 
 // AuthInterceptor checks for a valid JWT and injects a lightweight User into the context.
 // It uses a stateless strategy, relying on claims within the token to avoid database bottlenecks.
+// cmd/server/middleware.go
+
 func (s *GrpcServer) AuthInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	// 1. Skip Auth for Login
 	if info.FullMethod == "/chat.ChatService/Login" {
@@ -24,32 +26,41 @@ func (s *GrpcServer) AuthInterceptor(ctx context.Context, req interface{}, info 
 
 	// 2. Extract Token from Metadata
 	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Error(codes.Unauthenticated, "metadata is not provided")
+	tokenProvided := false
+	var token string
+	if ok {
+		values := md["authorization"]
+		if len(values) > 0 {
+			token = strings.TrimPrefix(values[0], "Bearer ")
+			tokenProvided = true
+		}
 	}
 
-	values := md["authorization"]
-	if len(values) == 0 {
+	// 3. For UpdatePassword, allow the call to proceed without a token.
+	// The handler logic will enforce authentication for non-whitelisted users.
+	if info.FullMethod == "/chat.ChatService/UpdatePassword" && !tokenProvided {
+		return handler(ctx, req)
+	}
+
+	// 4. Require token for everything else (or if a token was provided for UpdatePassword)
+	if !tokenProvided {
 		return nil, status.Error(codes.Unauthenticated, "authorization token is not provided")
 	}
 
-	token := strings.TrimPrefix(values[0], "Bearer ")
-
-	// 3. Validate Token
+	// 5. Validate Token
 	claims, err := ValidateJWT(token, s.appServer.Key)
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "access token is invalid: "+err.Error())
 	}
 
-	// 4. Populate lightweight User from Claims (Stateless Strategy)
-	// Prerequisite: UserClaims must be updated to include Role and Email.
+	// 6. Populate lightweight User from Claims
 	user := User{
 		ID:    claims.UserID,
 		Role:  claims.Role,
 		Email: claims.Email,
 	}
 
-	// 5. Inject User into Context
+	// 7. Inject User into Context
 	newCtx := context.WithValue(ctx, userContextKey, user)
 
 	return handler(newCtx, req)

@@ -16,6 +16,8 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/rexlx/squall/proto"
 )
@@ -144,6 +146,13 @@ func MakeLoginScreen(onSuccess func()) fyne.CanvasObject {
 	loginBtn := widget.NewButton("Login", func() {
 		err := Client.Login(emailEntry.Text, passEntry.Text)
 		if err != nil {
+			// Check if the server signaled a whitelist redemption requirement
+			st, ok := status.FromError(err)
+			if ok && st.Code() == codes.AlreadyExists && st.Message() == "WHITELIST_PENDING_PASSWORD" {
+				showWhitelistPasswordPrompt(emailEntry.Text, onSuccess)
+				return
+			}
+
 			errorLabel.SetText(err.Error())
 			errorLabel.Show()
 		} else {
@@ -175,13 +184,19 @@ func MakeMainScreen() fyne.CanvasObject {
 	}
 
 	savedRoomsList := container.NewVBox()
-	refreshSavedRooms := func() {
+	var refreshSavedRooms func()
+	refreshSavedRooms = func() {
 		savedRoomsList.Objects = nil
-		for _, r := range Client.User.Rooms {
+		for _, r := range Client.GetSavedRooms() {
 			rName := r
 			btn := widget.NewButton(rName, func() { loadRoom(rName) })
 			btn.Alignment = widget.ButtonAlignLeading
-			savedRoomsList.Add(btn)
+			deleteBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+				Client.RemoveRoomFromCache(rName)
+				refreshSavedRooms()
+			})
+			deleteBtn.Importance = widget.LowImportance
+			savedRoomsList.Add(container.NewBorder(nil, nil, nil, deleteBtn, btn))
 		}
 		savedRoomsList.Refresh()
 	}
@@ -197,13 +212,17 @@ func MakeMainScreen() fyne.CanvasObject {
 		}
 	})
 
-	savedSection := container.NewVBox(container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry), savedRoomsList)
+	savedRoomsSection := container.NewVBox(
+		container.NewBorder(nil, nil, nil, addRoomBtn, addRoomEntry),
+		savedRoomsList,
+	)
 
 	historyList := container.NewVBox()
 	refreshHistory := func() {
 		historyList.Objects = nil
-		for i := len(Client.User.History) - 1; i >= 0; i-- {
-			rName := Client.User.History[i]
+		localHistory := Client.GetLocalHistory()
+		for i := len(localHistory) - 1; i >= 0; i-- {
+			rName := localHistory[i]
 			btn := widget.NewButton(rName, func() { loadRoom(rName) })
 			btn.Alignment = widget.ButtonAlignLeading
 			historyList.Add(btn)
@@ -212,9 +231,15 @@ func MakeMainScreen() fyne.CanvasObject {
 	}
 	refreshHistory()
 
+	// Set up callbacks for real-time updates
+	Client.OnHistoryUpdate = refreshHistory
+	Client.OnRoomsUpdate = func() {
+		fyne.Do(refreshSavedRooms)
+	}
+
 	accordion := widget.NewAccordion(
-		widget.NewAccordionItem("SAVED ROOMS", savedSection),
-		widget.NewAccordionItem("HISTORY", historyList),
+		widget.NewAccordionItem("SAVED ROOMS", savedRoomsSection),
+		widget.NewAccordionItem("HISTORY", container.NewVScroll(historyList)),
 	)
 	accordion.Items[0].Open = true
 
@@ -405,4 +430,36 @@ func handleFileChunk(m *pb.ChatMessage) {
 			}, window)
 		})
 	}
+}
+
+func showWhitelistPasswordPrompt(email string, onSuccess func()) {
+	passEntry := widget.NewPasswordEntry()
+	passEntry.SetPlaceHolder("New Password")
+	confirmEntry := widget.NewPasswordEntry()
+	confirmEntry.SetPlaceHolder("Confirm Password")
+
+	items := []*widget.FormItem{
+		widget.NewFormItem("New Password", passEntry),
+		widget.NewFormItem("Confirm Password", confirmEntry),
+	}
+
+	dialog.ShowForm("Whitelist Activation", "Set Password", "Cancel", items, func(ok bool) {
+		if !ok {
+			return
+		}
+
+		if passEntry.Text == "" || passEntry.Text != confirmEntry.Text {
+			dialog.ShowError(fmt.Errorf("passwords must match and cannot be empty"), window)
+			return
+		}
+
+		// Send update request; for whitelist redemption, old password is empty
+		err := Client.UpdatePassword(email, "", passEntry.Text)
+		if err != nil {
+			dialog.ShowError(err, window)
+			return
+		}
+
+		dialog.ShowInformation("Success", "Account activated. You may now log in with your new password.", window)
+	}, window)
 }

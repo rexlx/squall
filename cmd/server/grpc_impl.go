@@ -30,15 +30,28 @@ func NewGrpcServer(app *Server) *GrpcServer {
 }
 
 func (s *GrpcServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
-	if req.Email == "" || req.Password == "" {
+	// 1. Validate input
+	if req.Email == "" {
 		return nil, status.Error(codes.InvalidArgument, "email and password are required")
 	}
 
+	// 2. Attempt to fetch user from DB
 	user, err := s.appServer.DB.GetUserByEmail(req.Email)
 	if err != nil {
+		// 3. If user is missing, check the global whitelist
+		WhitelistMu.RLock()
+		_, whitelisted := Whitelist[req.Email]
+		WhitelistMu.RUnlock()
+
+		if whitelisted {
+			// Return a specific signal for the client to prompt for a password
+			return nil, status.Error(codes.AlreadyExists, "WHITELIST_PENDING_PASSWORD")
+		}
+
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 
+	// 4. Verify password if user exists
 	ok, err := user.PasswordMatches(req.Password)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "internal auth error")
@@ -47,6 +60,7 @@ func (s *GrpcServer) Login(ctx context.Context, req *pb.LoginRequest) (*pb.Login
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 
+	// 5. Generate session token
 	token, err := GenerateJWT(user.ID, user.Role, user.Email, s.appServer.Key)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to generate token")
@@ -100,13 +114,61 @@ func (s *GrpcServer) CreateUser(ctx context.Context, req *pb.CreateUserRequest) 
 
 // cmd/server/grpc_impl.go updates
 
+// cmd/server/grpc_impl.go
+
 func (s *GrpcServer) UpdatePassword(ctx context.Context, req *pb.UpdatePasswordRequest) (*pb.UpdatePasswordResponse, error) {
-	caller, err := GetUserFromContext(ctx)
-	if err != nil {
-		return nil, err
+	// 1. Check for Whitelist Redemption first (Unauthenticated Path)
+	WhitelistMu.RLock()
+	_, isWhitelisted := Whitelist[req.Email]
+	WhitelistMu.RUnlock()
+
+	if isWhitelisted {
+		user, err := s.appServer.DB.GetUserByEmail(req.Email)
+
+		// Redeem if user record is missing OR their password is currently empty
+		if err != nil || user.Password == "" {
+			if err != nil {
+				// Initialize new user record if they don't exist in DB yet
+				randBytes := make([]byte, 16)
+				rand.Read(randBytes)
+				user = User{
+					ID:      hex.EncodeToString(randBytes),
+					Email:   req.Email,
+					Role:    "user",
+					Created: time.Now(),
+					Updated: time.Now(),
+				}
+			}
+
+			// Set new password and save
+			if err := user.SetPassword(req.NewPassword); err != nil {
+				return nil, status.Error(codes.Internal, "failed to hash password")
+			}
+			if err := s.appServer.DB.StoreUser(user); err != nil {
+				return nil, status.Error(codes.Internal, "failed to store whitelisted user")
+			}
+
+			// Remove from whitelist after successful activation
+			WhitelistMu.Lock()
+			delete(Whitelist, req.Email)
+			WhitelistMu.Unlock()
+
+			return &pb.UpdatePasswordResponse{
+				Success: true,
+				Message: "Account activated successfully. You may now log in.",
+			}, nil
+		}
 	}
 
-	// Security: Users can only update their own password unless they are an admin
+	// 2. Standard Password Update Logic (Authenticated Path)
+	// If the user isn't whitelisted, they MUST have a valid token (provided by the interceptor)
+	caller, err := GetUserFromContext(ctx)
+	if err != nil {
+		// This triggers if no token was provided AND the email wasn't whitelisted
+		return nil, status.Error(codes.Unauthenticated, "authentication required for this operation")
+	}
+
+	// Security: Only allow self-updates or Admin overrides
 	if caller.Email != req.Email && caller.Role != "admin" {
 		return nil, status.Error(codes.PermissionDenied, "unauthorized password update")
 	}
@@ -116,7 +178,7 @@ func (s *GrpcServer) UpdatePassword(ctx context.Context, req *pb.UpdatePasswordR
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
 
-	// Verify old password (skip check if admin is performing the update)
+	// Verify old password (Admins skip this check)
 	if caller.Role != "admin" {
 		ok, _ := user.PasswordMatches(req.OldPassword)
 		if !ok {
@@ -132,7 +194,44 @@ func (s *GrpcServer) UpdatePassword(ctx context.Context, req *pb.UpdatePasswordR
 		return nil, status.Error(codes.Internal, "failed to update user")
 	}
 
-	return &pb.UpdatePasswordResponse{Success: true, Message: "Password updated successfully"}, nil
+	return &pb.UpdatePasswordResponse{
+		Success: true,
+		Message: "Password updated successfully",
+	}, nil
+}
+
+func (s *GrpcServer) UpdateUser(ctx context.Context, req *pb.UpdateUserRequest) (*pb.UpdateUserResponse, error) {
+	// Get authenticated user from context
+	caller, err := GetUserFromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "authentication required")
+	}
+
+	// Security: Only allow self-updates or Admin overrides
+	if caller.Email != req.User.Email && caller.Role != "admin" {
+		return nil, status.Error(codes.PermissionDenied, "unauthorized user update")
+	}
+
+	// Fetch the user from database
+	user, err := s.appServer.DB.GetUserByEmail(req.User.Email)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+
+	// Update the rooms and history fields
+	user.Rooms = req.User.Rooms
+	user.History = req.User.History
+	user.Updated = time.Now()
+
+	// Store updated user
+	if err := s.appServer.DB.StoreUser(user); err != nil {
+		return nil, status.Error(codes.Internal, "failed to update user")
+	}
+
+	return &pb.UpdateUserResponse{
+		Success: true,
+		Message: "User updated successfully",
+	}, nil
 }
 
 func (s *GrpcServer) JoinRoom(ctx context.Context, req *pb.JoinRoomRequest) (*pb.RoomResponse, error) {

@@ -43,6 +43,9 @@ func main() {
 	if jwtKey == "" {
 		logger.Fatal("CRITICAL: JWT_SECRET environment variable must be set.")
 	}
+	WhitelistMu.Lock()
+	Whitelist["test@example.com"] = true
+	WhitelistMu.Unlock()
 
 	// 4. Connect to Database
 	db, err := NewPostgresDB(dsn)
